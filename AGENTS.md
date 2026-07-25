@@ -2,9 +2,9 @@
 
 ## Project Structure and Module Organization
 
-This repository contains a TypeScript VS Code extension. Runtime code lives in `src/`: `extension.ts` registers commands and activation behavior, `blogExplorer.ts` and `blogSearch.ts` provide views, and `mapStore.ts` manages the JSON entry index. Shared interfaces belong in `src/types.ts`.
+This repository contains a TypeScript VS Code extension. Runtime code lives in `src/`: `extension.ts` registers commands, activation, and the file-watching pipeline; `blogIndex.ts` is the SQLite/FTS5 index service; `searchView.ts` provides the sidebar webview; `entryGrouping.ts`, `frontmatter.ts`, and `pathUtils.ts` are pure helpers used by the index and views; `gitignoreCore.ts` and `gitignoreGuard.ts` handle the `.gitignore` offer; `webviewSupport.ts` validates inbound webview messages. Shared interfaces belong in `src/types.ts`.
 
-Tests are under `src/test/`. Keep fast, VS Code-independent tests beside `mapStore.test.ts`; place Extension Host tests in `src/test/suite/`. TypeScript compiles to the generated `out/` directory. The activity-bar icon is in `resources/`, while `dogfood/` is sample journal data used by the workspace configuration.
+Tests are under `src/test/`. Keep fast, VS Code-independent tests beside `blogIndex.test.ts`, `entryGrouping.test.ts`, `frontmatter.test.ts`, `gitignoreCore.test.ts`, and `pathUtils.test.ts`; place Extension Host tests in `src/test/suite/`. TypeScript compiles to the generated `out/` directory. The activity-bar icon is in `resources/`.
 
 ## Build, Test, and Development Commands
 

@@ -1,4 +1,4 @@
-# VS Journal Extension
+# Journal
 
 A simple blog extension for VS Code that stores entries in markdown format with a file-based structure.
 
@@ -11,8 +11,10 @@ A simple blog extension for VS Code that stores entries in markdown format with 
 - **Inline Search**: Ranked, snippeted results, with Match Case / Whole Word /
   Regex toggles
 - **SQLite Index**: A repository-local SQLite/FTS5 database indexes titles, content, and tags
-- **WYSIWYG Support**: Markdown preview and editing capabilities
-- **Image Support**: Drag and drop images to assets folder (planned)
+- Entries open as plain markdown, so VS Code's own markdown preview and editing
+  tools apply
+
+Not yet implemented: drag-and-drop image support into the `assets/` folder.
 
 ## Directory Structure
 
@@ -63,8 +65,8 @@ section header between them.
 - `tag:<value>` restricts the search to tag names (case-insensitive
   substring match). Tag chips in results are clickable and run that search.
 - Press Enter to search; the Clear button next to the input resets the view
-  back to the browse list (also available as `VS Journal: Clear Search` from
-  the Command Palette). `VS Journal: Search Blog` focuses the search input.
+  back to the browse list (also available as `Journal: Clear Search` from
+  the Command Palette). `Journal: Search Blog` focuses the search input.
 
 ## Git and the generated index
 
@@ -79,7 +81,7 @@ rule does not untrack them; untrack them manually (for example
 
 ## Usage
 
-1. Use `Ctrl+Shift+P` and search for "VS Journal: New Blog Entry"
+1. Use `Ctrl+Shift+P` and search for "Journal: New Blog Entry"
 2. Enter a title for your entry
 3. Start writing in the markdown file that opens
 4. Your entry will appear in the Journal sidebar's browse list
