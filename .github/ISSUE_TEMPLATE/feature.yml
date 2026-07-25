@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose an improvement grounded in a clear user problem.
+title: "[Feature]: "
+labels:
+  - feature
+body:
+  - type: markdown
+    attributes:
+      value: Describe the need before prescribing implementation details.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Explain who is affected, what they are trying to do, and why the current behavior is insufficient.
+      placeholder: As a journal author, I need...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the desired behavior or user experience.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: List observable, testable conditions that define completion.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add alternatives considered, examples, screenshots, or related links.

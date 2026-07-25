@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-unit-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+  # Verifies that every supported platform target can be packaged with
+  # the correct sqlite3 N-API prebuilt binary bundled in the VSIX.
+  package-platform-targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - win32-x64
+          - darwin-x64
+          - darwin-arm64
+          - linux-x64
+          - linux-arm64
+          - alpine-x64
+          - alpine-arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package platform target
+        run: npm run package:${{ matrix.target }}
+
+      - name: Verify the bundled native binary
+        run: |
+          VSIX=$(ls *.vsix)
+          unzip -l "$VSIX" | grep "node_modules/sqlite3/build/Release/node_sqlite3.node"

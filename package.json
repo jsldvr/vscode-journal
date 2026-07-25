@@ -1,0 +1,209 @@
+{
+  "name": "vs-journal",
+  "displayName": "VS Journal",
+  "description": "A simple blog extension that stores entries in markdown, with a tree view browser and full-text search",
+  "version": "0.1.0",
+  "publisher": "jsldvr",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jsldvr/vscode-journal.git"
+  },
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "blog",
+    "journal",
+    "markdown",
+    "writing"
+  ],
+  "activationEvents": [
+    "onCommand:vsJournal.newEntry",
+    "onCommand:vsJournal.openBlog",
+    "onCommand:vsJournal.refreshEntries",
+    "onCommand:vsJournal.search",
+    "onCommand:vsJournal.clearSearch",
+    "onCommand:vsJournal.openEntry",
+    "onCommand:vsJournal.searchByTag",
+    "onCommand:vsJournal.setBlogPath",
+    "onCommand:vsJournal.rescanEntries",
+    "onView:vsJournal.search"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vsJournal.newEntry",
+        "title": "New Blog Entry",
+        "category": "VS Journal",
+        "icon": "$(add)"
+      },
+      {
+        "command": "vsJournal.openBlog",
+        "title": "Open Blog",
+        "category": "VS Journal",
+        "icon": "$(book)"
+      },
+      {
+        "command": "vsJournal.refreshEntries",
+        "title": "Refresh",
+        "category": "VS Journal",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vsJournal.search",
+        "title": "Search Blog",
+        "category": "VS Journal",
+        "icon": "$(search)"
+      },
+      {
+        "command": "vsJournal.clearSearch",
+        "title": "Clear Search",
+        "category": "VS Journal",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "vsJournal.openEntry",
+        "title": "Open Entry",
+        "category": "VS Journal"
+      },
+      {
+        "command": "vsJournal.searchByTag",
+        "title": "Search by Tag",
+        "category": "VS Journal"
+      },
+      {
+        "command": "vsJournal.setBlogPath",
+        "title": "Set Blog Directory",
+        "category": "VS Journal",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "vsJournal.rescanEntries",
+        "title": "Rescan All Entries",
+        "category": "VS Journal",
+        "icon": "$(sync)"
+      }
+    ],
+    "views": {
+      "vsJournal": [
+        {
+          "type": "webview",
+          "id": "vsJournal.search",
+          "name": "Journal",
+          "when": "true"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vsJournal",
+          "title": "Journal",
+          "icon": "resources/journal-icon.svg"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "vsJournal.newEntry",
+          "when": "view == vsJournal.search",
+          "group": "navigation"
+        },
+        {
+          "command": "vsJournal.refreshEntries",
+          "when": "view == vsJournal.search",
+          "group": "navigation"
+        },
+        {
+          "command": "vsJournal.rescanEntries",
+          "when": "view == vsJournal.search",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vsJournal.newEntry"
+        },
+        {
+          "command": "vsJournal.openBlog"
+        },
+        {
+          "command": "vsJournal.setBlogPath"
+        },
+        {
+          "command": "vsJournal.openEntry",
+          "when": "false"
+        },
+        {
+          "command": "vsJournal.searchByTag",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "VS Journal",
+      "properties": {
+        "vsJournal.blogPath": {
+          "type": "string",
+          "default": "./blog",
+          "description": "Path to the blog directory relative to workspace root",
+          "pattern": "^[^<>:\"|?*]+$",
+          "patternErrorMessage": "Invalid path characters. Please use a valid directory path."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "typecheck": "tsc --noEmit -p ./",
+    "watch": "tsc -watch -p ./",
+    "prepare": "husky install",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "lint:staged": "lint-staged",
+    "release:check": "npm run compile && npm run lint && npm run test:unit",
+    "package": "vsce package",
+    "stage:sqlite3": "node scripts/stage-sqlite3-prebuild.js",
+    "package:win32-x64": "node scripts/stage-sqlite3-prebuild.js win32-x64 && vsce package --target win32-x64",
+    "package:darwin-x64": "node scripts/stage-sqlite3-prebuild.js darwin-x64 && vsce package --target darwin-x64",
+    "package:darwin-arm64": "node scripts/stage-sqlite3-prebuild.js darwin-arm64 && vsce package --target darwin-arm64",
+    "package:linux-x64": "node scripts/stage-sqlite3-prebuild.js linux-x64 && vsce package --target linux-x64",
+    "package:linux-arm64": "node scripts/stage-sqlite3-prebuild.js linux-arm64 && vsce package --target linux-arm64",
+    "package:alpine-x64": "node scripts/stage-sqlite3-prebuild.js alpine-x64 && vsce package --target alpine-x64",
+    "package:alpine-arm64": "node scripts/stage-sqlite3-prebuild.js alpine-arm64 && vsce package --target alpine-arm64",
+    "test:unit": "mocha --ui tdd --timeout 20000 \"out/test/*.test.js\"",
+    "test:integration": "node ./out/test/runTest.js",
+    "test": "npm run test:unit && npm run test:integration"
+  },
+  "lint-staged": {
+    "*.ts": "eslint"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/mocha": "^10.0.10",
+    "@types/moment": "^2.13.0",
+    "@types/node": "16.x",
+    "@types/sqlite3": "^5.1.0",
+    "@types/vscode": "^1.74.0",
+    "@typescript-eslint/eslint-plugin": "^5.45.0",
+    "@typescript-eslint/parser": "^5.45.0",
+    "@vscode/test-electron": "^3.0.0",
+    "@vscode/vsce": "^3.6.0",
+    "eslint": "^8.28.0",
+    "husky": "^8.0.3",
+    "lint-staged": "^13.2.3",
+    "mocha": "^11.7.6",
+    "typescript": "^4.9.4"
+  },
+  "dependencies": {
+    "fs-extra": "^11.1.0",
+    "moment": "^2.29.4",
+    "sqlite3": "6.0.1"
+  }
+}

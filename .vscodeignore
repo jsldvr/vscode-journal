@@ -1,0 +1,14 @@
+.vscode/**
+.github/**
+.claude/**
+.gitignore
+dogfood/**
+scripts/**
+src/**
+tsconfig.json
+package-lock.json
+*.vsix
+out/test/**
+AGENTS.md
+CLAUDE.md
+RELEASING.md
