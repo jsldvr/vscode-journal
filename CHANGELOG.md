@@ -35,8 +35,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The explorer, welcome state, entry creation, file watchers, and rescans now
   read and write the SQLite index instead of `entries/map.json`. Existing
   `map.json` files are left untouched but are no longer required or updated.
-- `vsJournal.search` now reveals and focuses the persistent Search view input
-  instead of opening a modal input box.
+- `Journal: Search Blog` now reveals and focuses the persistent Search view
+  input instead of opening a modal input box.
 - Search results are ranked by full-text relevance with snippets instead of
   raw match counts, and no query re-reads Markdown files from disk.
 - The VS Code development launch now installs dependencies before starting the compiler watcher.

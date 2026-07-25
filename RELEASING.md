@@ -123,7 +123,7 @@ npm run stage:sqlite3
 
 In a disposable workspace, confirm that:
 
-- The VS Journal Activity Bar view opens.
+- The Journal Activity Bar view opens.
 - A journal directory can be selected.
 - An entry can be created, displayed in the tree, and found by search.
 - Rescanning preserves the entry index.

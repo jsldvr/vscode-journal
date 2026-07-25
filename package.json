@@ -1,9 +1,10 @@
 {
   "name": "vs-journal",
-  "displayName": "VS Journal",
+  "displayName": "Journal",
   "description": "A simple blog extension that stores entries in markdown, with a tree view browser and full-text search",
   "version": "0.1.0",
   "publisher": "jsldvr",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/jsldvr/vscode-journal.git"
@@ -38,53 +39,53 @@
       {
         "command": "vsJournal.newEntry",
         "title": "New Blog Entry",
-        "category": "VS Journal",
+        "category": "Journal",
         "icon": "$(add)"
       },
       {
         "command": "vsJournal.openBlog",
         "title": "Open Blog",
-        "category": "VS Journal",
+        "category": "Journal",
         "icon": "$(book)"
       },
       {
         "command": "vsJournal.refreshEntries",
         "title": "Refresh",
-        "category": "VS Journal",
+        "category": "Journal",
         "icon": "$(refresh)"
       },
       {
         "command": "vsJournal.search",
         "title": "Search Blog",
-        "category": "VS Journal",
+        "category": "Journal",
         "icon": "$(search)"
       },
       {
         "command": "vsJournal.clearSearch",
         "title": "Clear Search",
-        "category": "VS Journal",
+        "category": "Journal",
         "icon": "$(clear-all)"
       },
       {
         "command": "vsJournal.openEntry",
         "title": "Open Entry",
-        "category": "VS Journal"
+        "category": "Journal"
       },
       {
         "command": "vsJournal.searchByTag",
         "title": "Search by Tag",
-        "category": "VS Journal"
+        "category": "Journal"
       },
       {
         "command": "vsJournal.setBlogPath",
         "title": "Set Blog Directory",
-        "category": "VS Journal",
+        "category": "Journal",
         "icon": "$(folder)"
       },
       {
         "command": "vsJournal.rescanEntries",
         "title": "Rescan All Entries",
-        "category": "VS Journal",
+        "category": "Journal",
         "icon": "$(sync)"
       }
     ],
@@ -146,7 +147,7 @@
       ]
     },
     "configuration": {
-      "title": "VS Journal",
+      "title": "Journal",
       "properties": {
         "vsJournal.blogPath": {
           "type": "string",
