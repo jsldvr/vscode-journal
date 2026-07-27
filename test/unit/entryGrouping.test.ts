@@ -1,6 +1,6 @@
 import * as assert from "assert";
-import { groupEntriesByYearMonth } from "../entryGrouping";
-import { BlogEntry } from "../types";
+import { groupEntriesByYearMonth } from "../../src/entryGrouping";
+import { BlogEntry } from "../../src/types";
 
 function entry(date: string, title = date): BlogEntry {
   return { title, date, path: `${date}.md`, tags: [] };

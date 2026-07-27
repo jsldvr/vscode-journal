@@ -10,7 +10,7 @@ import {
   InvalidSearchPatternError,
   SNIPPET_START,
   makeLikeSnippet,
-} from "../blogIndex";
+} from "../../src/blogIndex";
 
 async function makeEntriesDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-index-"));

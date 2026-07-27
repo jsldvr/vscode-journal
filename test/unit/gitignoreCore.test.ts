@@ -6,7 +6,7 @@ import {
   GITIGNORE_RULE,
   appendGitignoreRule,
   gitignoreCoversGeneratedDir,
-} from "../gitignoreCore";
+} from "../../src/gitignoreCore";
 
 suite("gitignoreCore", () => {
   test("recognizes existing rules that cover the generated directory", () => {

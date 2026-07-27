@@ -2,7 +2,11 @@ import * as assert from "assert";
 import * as fs from "fs-extra";
 import * as os from "os";
 import * as path from "path";
-import { createUniqueFile, isPathInside, normalizeEntryPath } from "../pathUtils";
+import {
+  createUniqueFile,
+  isPathInside,
+  normalizeEntryPath,
+} from "../../src/pathUtils";
 
 async function makeTempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-paths-"));

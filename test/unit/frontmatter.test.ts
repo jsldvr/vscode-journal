@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { parseEntryContent } from "../frontmatter";
+import { parseEntryContent } from "../../src/frontmatter";
 
 const SAMPLE = `---
 title: Hello World

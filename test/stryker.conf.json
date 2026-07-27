@@ -1,0 +1,28 @@
+{
+  "$schema": "../node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "mutate": [
+    "src/entryGrouping.ts",
+    "src/frontmatter.ts",
+    "src/pathUtils.ts"
+  ],
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "npm run test:mutation:runner"
+  },
+  "coverageAnalysis": "off",
+  "concurrency": 4,
+  "timeoutMS": 30000,
+  "reporters": [
+    "clear-text",
+    "progress",
+    "html",
+    "json"
+  ],
+  "htmlReporter": {
+    "fileName": "test/results/mutation/mutation.html"
+  },
+  "jsonReporter": {
+    "fileName": "test/results/mutation/mutation.json"
+  },
+  "tempDirName": "test/results/stryker-tmp"
+}

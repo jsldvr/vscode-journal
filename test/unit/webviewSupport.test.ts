@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { escapeHtml, validateWebviewMessage } from "../webviewSupport";
+import { escapeHtml, validateWebviewMessage } from "../../src/webviewSupport";
 
 suite("webviewSupport", () => {
   test("valid inbound messages are accepted with their payloads", () => {
