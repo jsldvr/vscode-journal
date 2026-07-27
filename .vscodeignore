@@ -9,6 +9,7 @@ tsconfig.json
 package-lock.json
 *.vsix
 out/test/**
+test/**
 AGENTS.md
 CLAUDE.md
 RELEASING.md

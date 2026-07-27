@@ -110,7 +110,7 @@ To build and install the extension locally from source:
 ```text
 npm ci
 npm run package:win32-x64   # or your platform target, see RELEASING.md
-code --install-extension vs-journal-0.1.0.vsix --force
+code --install-extension vscode-journal-<target>-<version>.vsix --force
 ```
 
 ## Releasing

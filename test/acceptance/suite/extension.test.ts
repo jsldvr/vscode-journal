@@ -4,7 +4,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 
 async function activateExtension(): Promise<void> {
-  const extension = vscode.extensions.getExtension("jsldvr.vs-journal");
+  const extension = vscode.extensions.getExtension("jsldvr.vscode-journal");
   assert.ok(extension, "Extension not found");
   await extension.activate();
   assert.strictEqual(extension.isActive, true);

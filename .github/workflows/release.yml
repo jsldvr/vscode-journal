@@ -1,0 +1,188 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 20
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      title: ${{ steps.metadata.outputs.title }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      should_release: ${{ steps.existing.outputs.should_release }}
+
+    steps:
+      - name: Check out repository and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Prepare release metadata
+        id: metadata
+        run: |
+          node scripts/release-metadata.js \
+            --output-dir "$RUNNER_TEMP/release" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Check for an existing version
+        id: existing
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          if git rev-parse --quiet --verify "refs/tags/$TAG" >/dev/null ||
+             gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Version $TAG already exists; release is a no-op."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload release metadata
+        if: steps.existing.outputs.should_release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+          retention-days: 1
+
+  verify:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run release checks
+        run: npm run release:check
+
+  package:
+    needs:
+      - prepare
+      - verify
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - win32-x64
+          - darwin-x64
+          - darwin-arm64
+          - linux-x64
+          - linux-arm64
+          - alpine-x64
+          - alpine-arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package platform target
+        run: npm run package:${{ matrix.target }}
+
+      - name: Verify the bundled native binary
+        run: |
+          VSIX=$(find . -maxdepth 1 -name '*.vsix' -print -quit)
+          test -n "$VSIX"
+          unzip -l "$VSIX" |
+            grep "node_modules/sqlite3/build/Release/node_sqlite3.node"
+
+      - name: Upload platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.target }}
+          path: ./*.vsix
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs:
+      - prepare
+      - verify
+      - package
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: release-metadata
+          path: release
+
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vsix-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TITLE: ${{ needs.prepare.outputs.title }}
+        run: |
+          ARGS=(
+            release create "$TAG"
+            dist/*.vsix
+            --target "$GITHUB_SHA"
+            --title "$TITLE"
+            --notes-file release/release-notes.md
+          )
+          if [ "$PRERELEASE" = "true" ]; then
+            ARGS+=(--prerelease)
+          fi
+          gh "${ARGS[@]}"
