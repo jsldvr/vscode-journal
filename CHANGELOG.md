@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-26
+
 ### Added
 
 - A repository-local SQLite/FTS5 index at `<blog>/entries/.vs-journal/index.sqlite3`
@@ -29,6 +31,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - A default pull request template and structured bug and feature issue forms.
 - Weekly grouped Dependabot updates for npm dependencies.
 - Pre-commit type checking and staged TypeScript linting with Husky and lint-staged.
+- A comprehensive test system under `test/` with unit, VS Code Extension Host
+  acceptance, property, bounded torture, mutation, and aggregate QA suites.
+- Automated GitHub releases driven by the `package.json` SemVer, with
+  platform-specific VSIX artifacts, changelog release notes, contributor
+  attribution, duplicate-release protection, and prerelease support.
 
 ### Changed
 
@@ -40,6 +47,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Search results are ranked by full-text relevance with snippets instead of
   raw match counts, and no query re-reads Markdown files from disk.
 - The VS Code development launch now installs dependencies before starting the compiler watcher.
+- The npm package identifier is now `vscode-journal`, and the extension version
+  is `1.0.0`.
 
 ### Removed
 

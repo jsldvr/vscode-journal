@@ -8,6 +8,7 @@ const commands = [
   "test:compile",
   "test:unit:run",
   "test:property:run",
+  "test:release",
   "test:acceptance:run",
 ];
 

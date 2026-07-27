@@ -1,8 +1,8 @@
 {
-  "name": "vs-journal",
+  "name": "vscode-journal",
   "displayName": "Journal",
   "description": "A simple blog extension that stores entries in markdown, with a tree view browser and full-text search",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "publisher": "jsldvr",
   "license": "MIT",
   "repository": {
@@ -167,7 +167,8 @@
     "prepare": "husky install",
     "lint": "eslint src test --ext ts --ignore-pattern test/results/**",
     "lint:staged": "lint-staged",
-    "release:check": "npm run compile && npm run lint && npm run test:unit",
+    "release:check": "npm run compile && npm run lint && npm run test:unit && npm run test:release",
+    "release:metadata": "node scripts/release-metadata.js --output-dir test/results/release",
     "package": "vsce package",
     "stage:sqlite3": "node scripts/stage-sqlite3-prebuild.js",
     "package:win32-x64": "node scripts/stage-sqlite3-prebuild.js win32-x64 && vsce package --target win32-x64",
@@ -183,6 +184,7 @@
     "test:unit": "npm run test:compile && npm run test:unit:run",
     "test:property:run": "mocha --ui tdd --timeout 20000 \"test/results/compiled/test/property/*.property.test.js\"",
     "test:property": "npm run test:compile && npm run test:property:run",
+    "test:release": "mocha --ui tdd --timeout 20000 \"test/scripts/*.test.js\"",
     "test:acceptance:run": "node test/results/compiled/test/acceptance/runTest.js",
     "test:acceptance": "npm run compile && npm run test:compile && npm run test:acceptance:run",
     "test:integration": "npm run test:acceptance",

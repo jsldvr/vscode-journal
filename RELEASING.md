@@ -1,15 +1,18 @@
 # Release Process
 
-This procedure creates and verifies a local VSIX release from `main`. It does
-not publish to the VS Code Marketplace or create a GitHub release.
+This procedure prepares and verifies a release from `main`. After the release
+change reaches `main`, `.github/workflows/release.yml` creates the Git tag,
+builds every supported VSIX, and publishes the GitHub release. It does not
+publish to the VS Code Marketplace.
 
-Replace `X.Y.Z` in every command with the intended semantic version.
+Replace `X.Y.Z` in every command with the intended semantic version. Valid
+prerelease versions such as `1.0.1-rc-1` and `1.0.1-beta` are supported.
 
 ## Prerequisites
 
 - Node.js, npm, Git, and the VS Code `code` CLI are available.
-- You have explicit authorization to create and push the release commit and tag.
 - The release version and scope have been agreed before changing files.
+- The release change will be reviewed and merged into `main`.
 
 ## Native Dependency
 
@@ -64,6 +67,12 @@ In `CHANGELOG.md`:
 2. Add a new `## [Unreleased]` section above the release.
 3. Omit empty change-category headings.
 4. Describe only changes included in the release.
+
+The changelog heading must match the package version exactly. For example:
+
+```text
+## [1.0.1-rc-1] - YYYY-MM-DD
+```
 
 Review the release metadata:
 
@@ -128,21 +137,38 @@ In a disposable workspace, confirm that:
 - An entry can be created, displayed in the tree, and found by search.
 - Rescanning preserves the entry index.
 
-## 5. Commit and Tag
+## 5. Merge the Release Change
 
 Review `git status --short`; only the version and changelog files should be
 tracked release changes. The VSIX is ignored by Git.
 
-Agents must stop here unless the user explicitly authorized the release commit,
-tag, and push. With that authorization:
+Commit the version and changelog on a branch, push it, and merge it through the
+normal pull request process:
 
 ```bash
 git add package.json package-lock.json CHANGELOG.md
 git commit -m "Release vX.Y.Z"
-git tag -a vX.Y.Z -m "vX.Y.Z"
-git push origin main
-git push origin vX.Y.Z
+git push
 ```
 
-Marketplace publication and GitHub release creation require separate
-authorization and are not part of this procedure.
+Do not create or push the version tag manually. On the push to `main`, the
+release workflow:
+
+1. Reads and validates the version from `package.json`.
+2. Exits successfully when that version tag or release already exists.
+3. Extracts the matching changelog section and contributors since the prior
+   release tag.
+4. Runs the release checks.
+5. Builds and verifies all seven platform-specific VSIX packages.
+6. Creates `vX.Y.Z` and a GitHub release titled `Release vX.Y.Z`.
+7. Marks versions with a SemVer prerelease suffix as prereleases.
+
+Monitor the workflow:
+
+```bash
+gh run list --workflow release.yml
+gh run watch
+```
+
+Marketplace publication still requires separate authorization and is not part
+of this procedure.

@@ -10,9 +10,12 @@ commands when needed.
 - `npm run test:unit` compiles and runs deterministic unit tests.
 - `npm run test:property` checks generated path, frontmatter, and grouping
   invariants with reproducible `fast-check` failures.
+- `npm run test:release` checks SemVer classification, changelog extraction,
+  contributor attribution, and generated GitHub release metadata.
 - `npm run test:acceptance` launches a disposable VS Code Extension Host and
   exercises activation, indexing, and registered commands.
-- `npm run test:qa` runs compile, lint, unit, property, and acceptance checks.
+- `npm run test:qa` runs compile, lint, unit, property, release-metadata, and
+  acceptance checks.
 - `npm test` is an alias for the QA gate.
 
 `VSCODE_TEST_VERSION` selects the VS Code build for acceptance tests. It
