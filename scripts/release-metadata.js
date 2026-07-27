@@ -10,7 +10,7 @@ const SEMVER_PATTERN =
 function parseSemver(version) {
   const match = SEMVER_PATTERN.exec(version);
   if (!match) {
-    throw new Error(`Invalid semantic version in package.json: ${version}`);
+    throw new Error(`Invalid semantic version: ${version}`);
   }
   return {
     version,

@@ -21,7 +21,10 @@ suite("release metadata", () => {
 
   test("rejects versions that are not strict semantic versions", () => {
     for (const version of ["v1.0.0", "1.0", "01.0.0", "1.0.0-01"]) {
-      assert.throws(() => parseSemver(version), /Invalid semantic version/);
+      assert.throws(
+        () => parseSemver(version),
+        new Error(`Invalid semantic version: ${version}`)
+      );
     }
   });
 
