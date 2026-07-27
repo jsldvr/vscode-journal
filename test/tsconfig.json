@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./results/compiled",
+    "rootDir": ".."
+  },
+  "include": [
+    "../src/**/*.ts",
+    "./acceptance/**/*.ts",
+    "./property/**/*.ts",
+    "./torture/**/*.ts",
+    "./unit/**/*.ts"
+  ],
+  "exclude": [
+    "../node_modules",
+    "./results"
+  ]
+}

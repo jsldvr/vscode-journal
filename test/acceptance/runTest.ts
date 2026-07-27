@@ -19,15 +19,20 @@ async function prepareWorkspace(): Promise<string> {
 }
 
 async function main() {
+  let workspaceDir: string | undefined;
   try {
-    const extensionDevelopmentPath = path.resolve(__dirname, "../../");
+    const extensionDevelopmentPath = path.resolve(__dirname, "../../../../..");
     const extensionTestsPath = path.resolve(__dirname, "./suite/index");
-    const workspaceDir = await prepareWorkspace();
+    workspaceDir = await prepareWorkspace();
 
     // VSCODE_TEST_VERSION selects the VS Code build under test
     // (e.g. "1.74.3" for the minimum supported engine, "stable" for
     // the latest release). Defaults to stable.
     const version = process.env.VSCODE_TEST_VERSION || "stable";
+
+    // Some development shells set this for Electron-based tooling. VS Code
+    // must launch as the application, not as a Node executable.
+    delete process.env.ELECTRON_RUN_AS_NODE;
 
     await runTests({
       version,
@@ -37,7 +42,11 @@ async function main() {
     });
   } catch (error) {
     console.error("Failed to run tests:", error);
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    if (workspaceDir) {
+      await fs.remove(workspaceDir).catch(() => undefined);
+    }
   }
 }
 
