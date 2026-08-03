@@ -203,7 +203,7 @@
     "@types/fs-extra": "^11.0.4",
     "@types/mocha": "^10.0.10",
     "@types/moment": "^2.13.0",
-    "@types/node": "16.x",
+    "@types/node": "25.x",
     "@types/sqlite3": "^5.1.0",
     "@types/vscode": "1.74.0",
     "@typescript-eslint/eslint-plugin": "^5.45.0",
