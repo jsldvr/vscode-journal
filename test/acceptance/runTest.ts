@@ -26,7 +26,7 @@ async function main() {
     workspaceDir = await prepareWorkspace();
 
     // VSCODE_TEST_VERSION selects the VS Code build under test
-    // (e.g. "1.74.3" for the minimum supported engine, "stable" for
+    // (e.g. "1.125.0" for the minimum supported engine, "stable" for
     // the latest release). Defaults to stable.
     const version = process.env.VSCODE_TEST_VERSION || "stable";
 

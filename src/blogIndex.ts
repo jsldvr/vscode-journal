@@ -1,7 +1,7 @@
 import * as fs from "fs-extra";
 import * as path from "path";
 import * as sqlite3 from "sqlite3";
-import * as moment from "moment";
+import moment = require("moment");
 import { isPathInside, normalizeEntryPath } from "./pathUtils";
 import { parseEntryContent } from "./frontmatter";
 import { BlogEntry } from "./types";
