@@ -117,7 +117,10 @@ export class MediaController {
         reason:
           "No workspace open, the configured blog path is outside the workspace, or the media path is unsafe.",
       });
-      this.detailsPanel?.showUnavailable();
+      // sync, not show: this is a background refresh path, not a user
+      // selection -- a hidden details tab must not be yanked to the
+      // foreground just because the media root became unavailable.
+      this.detailsPanel?.syncUnavailable();
       return;
     }
     try {
@@ -129,9 +132,9 @@ export class MediaController {
       if (this.detailsPanel) {
         const current = files.find((file) => file.path === this.detailsPanel?.currentPath);
         if (current) {
-          this.detailsPanel.show(this.toWire(mediaDir, current), mediaDir);
+          this.detailsPanel.syncFile(this.toWire(mediaDir, current), mediaDir);
         } else {
-          this.detailsPanel.showUnavailable();
+          this.detailsPanel.syncUnavailable();
         }
       }
     } catch (error) {
@@ -147,7 +150,7 @@ export class MediaController {
         type: "mediaDisabled",
         reason: "Failed to load media files. The media directory may be unavailable or unsafe.",
       });
-      this.detailsPanel?.showUnavailable();
+      this.detailsPanel?.syncUnavailable();
     }
   }
 
@@ -245,21 +248,35 @@ export class MediaController {
   // separate from dispatch() (the sidebar's message set) because
   // replies must go back to whichever webview asked -- the panel here,
   // never the sidebar -- and because the sidebar no longer has any UI
-  // that sends these.
+  // that sends these. Never rejects: a failure from getMediaDir(), a
+  // VS Code command, or the clipboard must never escape as an
+  // unhandled promise rejection -- it is reported as a normal status
+  // reply instead. The catch lives here (on the method itself) rather
+  // than only in the one call site that currently invokes it, so the
+  // guarantee holds for any future caller too.
   async performAction(message: MediaFileActionMessage, reply: ReplyFn): Promise<void> {
-    switch (message.type) {
-      case "mediaOpen":
-        await this.openFile(message.path, reply);
-        return;
-      case "mediaReveal":
-        await this.revealFile(message.path, reply);
-        return;
-      case "mediaCopyPath":
-        await this.copyPath(message.path, reply);
-        return;
-      case "mediaDelete":
-        await this.deleteFile(message.path, reply);
-        return;
+    try {
+      switch (message.type) {
+        case "mediaOpen":
+          await this.openFile(message.path, reply);
+          return;
+        case "mediaReveal":
+          await this.revealFile(message.path, reply);
+          return;
+        case "mediaCopyPath":
+          await this.copyPath(message.path, reply);
+          return;
+        case "mediaDelete":
+          await this.deleteFile(message.path, reply);
+          return;
+      }
+    } catch (error) {
+      console.error(`VS Journal: media details panel "${message.type}" action failed:`, error);
+      reply({
+        type: "mediaStatus",
+        message: "That action could not be completed.",
+        isError: true,
+      });
     }
   }
 

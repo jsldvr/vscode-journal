@@ -55,11 +55,38 @@ export class MediaDetailsPanel {
     return this.path;
   }
 
-  // Updates and reveals the panel for file. mediaDir scopes
-  // localResourceRoots to exactly the directory the previewUri (if any)
-  // needs -- recomputed on every call since it can theoretically differ
-  // between selections within the same session (a blog-path change).
+  // Updates and reveals the panel for file -- for an explicit selection
+  // (mediaSelect) only. mediaDir scopes localResourceRoots to exactly
+  // the directory the previewUri (if any) needs -- recomputed on every
+  // call since it can theoretically differ between selections within
+  // the same session (a blog-path change).
   show(file: MediaFileWire, mediaDir: string): void {
+    this.applyFile(file, mediaDir);
+    this.reveal();
+  }
+
+  // Explicit selection that turned out to be unavailable (e.g. the
+  // tapped tile's file was deleted by something else a moment earlier)
+  // -- also reveals, since the user did just ask to see this file.
+  showUnavailable(): void {
+    this.applyUnavailable();
+    this.reveal();
+  }
+
+  // Background content sync -- called from pushState() on every
+  // refresh/upload/watcher/config-change event to keep an *already
+  // open* panel accurate. Deliberately never reveals: a hidden tab must
+  // stay hidden and just have correct data ready for when the user
+  // switches back to it, not jump to the foreground on its own.
+  syncFile(file: MediaFileWire, mediaDir: string): void {
+    this.applyFile(file, mediaDir);
+  }
+
+  syncUnavailable(): void {
+    this.applyUnavailable();
+  }
+
+  private applyFile(file: MediaFileWire, mediaDir: string): void {
     this.path = file.path;
     this.panel.title = file.name;
     this.panel.webview.options = {
@@ -67,11 +94,21 @@ export class MediaDetailsPanel {
       localResourceRoots: [vscode.Uri.file(mediaDir)],
     };
     this.post({ type: "mediaDetailsData", file });
-    this.panel.reveal(vscode.ViewColumn.Active, false);
   }
 
-  showUnavailable(): void {
+  // Clears the stored path along with the content: once a selection is
+  // unavailable, it must stay unavailable even if a later scan finds a
+  // *different* file that happens to land on the same path (e.g. an
+  // upload reusing the just-freed filename) -- without this, pushState()'s
+  // sync would match that unrelated new file against the stale
+  // currentPath and silently reopen the panel showing it.
+  private applyUnavailable(): void {
+    this.path = undefined;
     this.post({ type: "mediaDetailsUnavailable" });
+  }
+
+  private reveal(): void {
+    this.panel.reveal(vscode.ViewColumn.Active, false);
   }
 
   private post(message: Record<string, unknown>): void {

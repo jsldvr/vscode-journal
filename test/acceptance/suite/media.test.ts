@@ -2,6 +2,8 @@ import * as assert from "assert";
 import * as fs from "fs-extra";
 import * as path from "path";
 import * as vscode from "vscode";
+import { MediaController, MediaFileWire } from "../../../src/mediaView";
+import { MediaDetailsPanel } from "../../../src/mediaDetailsPanel";
 
 async function activateExtension(): Promise<void> {
   const extension = vscode.extensions.getExtension("jsldvr.vscode-journal");
@@ -14,6 +16,45 @@ function workspaceRoot(): string {
   const folder = vscode.workspace.workspaceFolders?.[0];
   assert.ok(folder, "integration workspace missing");
   return folder.uri.fsPath;
+}
+
+function makeWireFile(relativePath: string): MediaFileWire {
+  return {
+    path: relativePath,
+    name: path.basename(relativePath),
+    type: "document",
+    size: 1,
+    mtimeMs: Date.now(),
+    sizeLabel: "1 B",
+  };
+}
+
+function isMediaDetailsTabActive(): boolean {
+  const tab = vscode.window.tabGroups.all
+    .flatMap((group) => group.tabs)
+    .find(
+      (candidate) =>
+        candidate.input instanceof vscode.TabInputWebview &&
+        candidate.input.viewType.includes("mediaDetails")
+    );
+  return !!tab?.isActive;
+}
+
+// panel.reveal() takes effect via async renderer-process message
+// passing; tabGroups.all does not reflect it synchronously.
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return predicate();
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 suite("Media Library", function () {
@@ -97,5 +138,116 @@ suite("Media Library", function () {
       0,
       "no media details editor panel should exist without an explicit tile selection"
     );
+  });
+
+  // The three tests below exercise MediaController/MediaDetailsPanel
+  // directly as plain exported classes, constructed with test-controlled
+  // deps rather than through the sidebar webview's message channel --
+  // there is no way to post a message into an arbitrary WebviewView's
+  // own script from an Extension Host test, but these classes need
+  // nothing beyond a real vscode host to run correctly, which this
+  // acceptance suite already provides.
+
+  test("background sync (syncFile/syncUnavailable) never reveals a hidden details panel; explicit selection (show/showUnavailable) does (focus-steal regression)", async () => {
+    await activateExtension();
+    const panel = new MediaDetailsPanel(
+      () => undefined,
+      () => undefined
+    );
+    try {
+      const file = makeWireFile("photo.png");
+
+      panel.show(file, workspaceRoot());
+      assert.strictEqual(
+        await waitFor(isMediaDetailsTabActive, 2000),
+        true,
+        "explicit show() must reveal/activate the panel"
+      );
+
+      // Move focus elsewhere so the details tab becomes hidden/inactive.
+      const scratch = await vscode.workspace.openTextDocument({
+        content: "scratch",
+        language: "plaintext",
+      });
+      await vscode.window.showTextDocument(scratch);
+      assert.strictEqual(
+        await waitFor(() => !isMediaDetailsTabActive(), 2000),
+        true,
+        "test setup: the details panel must be inactive before the background-sync calls under test"
+      );
+
+      // These must NOT reveal -- there is no "becomes true" state to
+      // poll for, so wait a fixed window long enough for a reveal to
+      // have manifested if the regression were present, then confirm
+      // it did not.
+      panel.syncFile(file, workspaceRoot());
+      await delay(300);
+      assert.strictEqual(isMediaDetailsTabActive(), false, "syncFile() must not reveal a hidden panel");
+
+      panel.syncUnavailable();
+      await delay(300);
+      assert.strictEqual(isMediaDetailsTabActive(), false, "syncUnavailable() must not reveal a hidden panel");
+
+      panel.showUnavailable();
+      assert.strictEqual(
+        await waitFor(isMediaDetailsTabActive, 2000),
+        true,
+        "explicit showUnavailable() must still reveal the panel"
+      );
+    } finally {
+      await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    }
+  });
+
+  test("becoming unavailable clears the panel's current path, so a later file at the same path is not silently reopened (stale-selection regression)", async () => {
+    await activateExtension();
+    const panel = new MediaDetailsPanel(
+      () => undefined,
+      () => undefined
+    );
+    try {
+      const file = makeWireFile("photo.png");
+
+      panel.show(file, workspaceRoot());
+      assert.strictEqual(panel.currentPath, "photo.png");
+
+      panel.showUnavailable();
+      assert.strictEqual(
+        panel.currentPath,
+        undefined,
+        "currentPath must be cleared so a future scan cannot match an unrelated file landing on the same path"
+      );
+
+      // The background-sync path (syncFile/syncUnavailable) must uphold
+      // the same invariant.
+      panel.syncFile(file, workspaceRoot());
+      assert.strictEqual(panel.currentPath, "photo.png");
+      panel.syncUnavailable();
+      assert.strictEqual(panel.currentPath, undefined);
+    } finally {
+      await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    }
+  });
+
+  test("MediaController.performAction reports a status error instead of letting a rejected action escape unhandled", async () => {
+    const controller = new MediaController(
+      {
+        getMediaDir: async () => {
+          throw new Error("boom");
+        },
+        onMediaDirEnsured: () => undefined,
+        requestFullRefresh: async () => undefined,
+      },
+      () => undefined
+    );
+
+    const replies: Record<string, unknown>[] = [];
+    await controller.performAction({ type: "mediaOpen", path: "photo.png" }, (reply) =>
+      replies.push(reply)
+    );
+
+    assert.strictEqual(replies.length, 1);
+    assert.strictEqual(replies[0].type, "mediaStatus");
+    assert.strictEqual(replies[0].isError, true);
   });
 });
