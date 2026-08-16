@@ -31,6 +31,8 @@
     "onCommand:vsJournal.searchByTag",
     "onCommand:vsJournal.setBlogPath",
     "onCommand:vsJournal.rescanEntries",
+    "onCommand:vsJournal.uploadMedia",
+    "onCommand:vsJournal.refreshMediaLibrary",
     "onView:vsJournal.search"
   ],
   "main": "./out/extension.js",
@@ -87,6 +89,18 @@
         "title": "Rescan All Entries",
         "category": "Journal",
         "icon": "$(sync)"
+      },
+      {
+        "command": "vsJournal.uploadMedia",
+        "title": "Upload Media",
+        "category": "Journal",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "vsJournal.refreshMediaLibrary",
+        "title": "Refresh Media Library",
+        "category": "Journal",
+        "icon": "$(refresh)"
       }
     ],
     "views": {
@@ -143,6 +157,12 @@
         {
           "command": "vsJournal.searchByTag",
           "when": "false"
+        },
+        {
+          "command": "vsJournal.uploadMedia"
+        },
+        {
+          "command": "vsJournal.refreshMediaLibrary"
         }
       ]
     },

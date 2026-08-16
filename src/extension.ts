@@ -4,10 +4,53 @@ import * as path from "path";
 import * as moment from "moment";
 import { BlogIndex } from "./blogIndex";
 import { SearchViewProvider } from "./searchView";
+import { hasSymlinkedAncestor } from "./mediaLibrary";
 import { maybeOfferGitignoreRule } from "./gitignoreGuard";
 import { createUniqueFile, isPathInside } from "./pathUtils";
 
 let activeHost: IndexHost | undefined;
+
+// Resolves the configured blog directory against the first workspace
+// folder, or undefined when there is no workspace or the configured
+// path resolves outside it. Shared by the entry index, the file
+// watcher, and the media library so the containment check lives in
+// exactly one place.
+function resolveBlogDir(): string | undefined {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    return undefined;
+  }
+  const config = vscode.workspace.getConfiguration("vsJournal");
+  const blogPath = config.get<string>("blogPath", "./blog");
+  const blogDir = path.resolve(workspaceFolder.uri.fsPath, blogPath);
+  if (!isPathInside(blogDir, workspaceFolder.uri.fsPath)) {
+    return undefined;
+  }
+  return blogDir;
+}
+
+// The media directory is a sibling of entries/, never created merely by
+// activation -- only on first upload or another explicit media action.
+// Async: beyond the (synchronous) blog-path containment check shared
+// with entries, media additionally rejects a symlinked ancestor
+// anywhere between the workspace root and the media root -- explicitly
+// scoped to media only, since upload and delete give a symlinked
+// ancestor a way to write or delete outside the blog that entries
+// (read-mostly) does not have. Entry containment is intentionally left
+// unchanged; it has the same latent gap, but fixing it is a separate,
+// pre-existing concern outside this feature's scope.
+async function resolveMediaDir(): Promise<string | undefined> {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  const blogDir = resolveBlogDir();
+  if (!workspaceFolder || !blogDir) {
+    return undefined;
+  }
+  const mediaDir = path.join(blogDir, "media");
+  if (await hasSymlinkedAncestor(workspaceFolder.uri.fsPath, mediaDir)) {
+    return undefined;
+  }
+  return mediaDir;
+}
 
 // Owns the lifecycle of the SQLite index for the configured journal:
 // opens it on activation, reopens it when vsJournal.blogPath changes,
@@ -23,17 +66,8 @@ class IndexHost {
   }
 
   entriesDir(): string | undefined {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!workspaceFolder) {
-      return undefined;
-    }
-    const config = vscode.workspace.getConfiguration("vsJournal");
-    const blogPath = config.get<string>("blogPath", "./blog");
-    const blogDir = path.resolve(workspaceFolder.uri.fsPath, blogPath);
-    if (!isPathInside(blogDir, workspaceFolder.uri.fsPath)) {
-      return undefined;
-    }
-    return path.join(blogDir, "entries");
+    const blogDir = resolveBlogDir();
+    return blogDir ? path.join(blogDir, "entries") : undefined;
   }
 
   // Opens (or returns) the index for the current configuration. The
@@ -103,13 +137,22 @@ export function activate(context: vscode.ExtensionContext) {
   const host = new IndexHost();
   activeHost = host;
 
-  const searchView = new SearchViewProvider({
-    getIndex: () => host.get(),
-    openEntry: (relativePath) => openEntryByRelativePath(host, relativePath),
-    createNewEntry: async () => {
-      await vscode.commands.executeCommand("vsJournal.newEntry");
+  // The Media library is composed into this single webview/provider
+  // rather than given its own contributed view -- see the class-level
+  // comment on SearchViewProvider.
+  const searchView = new SearchViewProvider(
+    {
+      getIndex: () => host.get(),
+      openEntry: (relativePath) => openEntryByRelativePath(host, relativePath),
+      createNewEntry: async () => {
+        await vscode.commands.executeCommand("vsJournal.newEntry");
+      },
     },
-  });
+    {
+      getMediaDir: () => resolveMediaDir(),
+      onMediaDirEnsured: () => void rebindMediaWatcher(),
+    }
+  );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
@@ -119,17 +162,45 @@ export function activate(context: vscode.ExtensionContext) {
     )
   );
 
-  function refreshViews() {
+  // Entry activity (saves, creates, deletes, rescans) must never imply a
+  // media directory rescan, and vice versa -- media has its own watcher
+  // and its own "ready"-handshake-triggered initial load. refreshViews()
+  // combines both only where that is actually correct: a blogPath
+  // change replaces both roots at once.
+  function refreshEntryViews() {
     searchView.refresh();
+  }
+
+  function refreshMediaView() {
+    void searchView.refreshMedia();
+  }
+
+  function refreshViews() {
+    refreshEntryViews();
+    refreshMediaView();
   }
 
   let fileWatcherDisposable: vscode.Disposable | undefined;
 
   function rebindFileWatcher() {
     fileWatcherDisposable?.dispose();
-    fileWatcherDisposable = createFileWatcher(host, refreshViews);
+    fileWatcherDisposable = createFileWatcher(host, refreshEntryViews);
     if (fileWatcherDisposable) {
       context.subscriptions.push(fileWatcherDisposable);
+    }
+  }
+
+  let mediaWatcherDisposable: vscode.Disposable | undefined;
+
+  // Rebinding is safe to call repeatedly: dispose+recreate. Called on
+  // activation, on a blogPath change, and after an upload that just
+  // created media/ on demand -- a watcher bound before the directory
+  // existed may never have started watching it.
+  async function rebindMediaWatcher(): Promise<void> {
+    mediaWatcherDisposable?.dispose();
+    mediaWatcherDisposable = await createMediaWatcher(refreshMediaView);
+    if (mediaWatcherDisposable) {
+      context.subscriptions.push(mediaWatcherDisposable);
     }
   }
 
@@ -137,7 +208,7 @@ export function activate(context: vscode.ExtensionContext) {
     "vsJournal.newEntry",
     async () => {
       await createNewEntry(host);
-      refreshViews();
+      refreshEntryViews();
     }
   );
 
@@ -151,7 +222,7 @@ export function activate(context: vscode.ExtensionContext) {
   const refreshCommand = vscode.commands.registerCommand(
     "vsJournal.refreshEntries",
     () => {
-      refreshViews();
+      refreshEntryViews();
     }
   );
 
@@ -209,10 +280,24 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       await index.rebuildAll();
-      refreshViews();
+      refreshEntryViews();
       vscode.window.showInformationMessage(
         "Blog entries rescanned and index rebuilt!"
       );
+    }
+  );
+
+  const uploadMediaCommand = vscode.commands.registerCommand(
+    "vsJournal.uploadMedia",
+    async () => {
+      await searchView.uploadMedia();
+    }
+  );
+
+  const refreshMediaLibraryCommand = vscode.commands.registerCommand(
+    "vsJournal.refreshMediaLibrary",
+    async () => {
+      await searchView.refreshMedia();
     }
   );
 
@@ -225,7 +310,9 @@ export function activate(context: vscode.ExtensionContext) {
     openEntryCommand,
     searchByTagCommand,
     setBlogPathCommand,
-    rescanCommand
+    rescanCommand,
+    uploadMediaCommand,
+    refreshMediaLibraryCommand
   );
 
   const configChangeListener = vscode.workspace.onDidChangeConfiguration(
@@ -240,6 +327,7 @@ export function activate(context: vscode.ExtensionContext) {
     await host.reopen();
     await initializeIndex();
     rebindFileWatcher();
+    await rebindMediaWatcher();
     searchView.clear();
     refreshViews();
     vscode.window.showInformationMessage(
@@ -253,17 +341,18 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   rebindFileWatcher();
+  void rebindMediaWatcher();
 
   // Open/create the database and reconcile it against the Markdown on
   // disk (insert new files, re-index changed ones, drop missing ones).
   async function initializeIndex() {
     const index = await host.ensure();
     if (!index) {
-      refreshViews();
+      refreshEntryViews();
       return;
     }
     await index.reconcile();
-    refreshViews();
+    refreshEntryViews();
     await maybeOfferGitignoreRule(context, index.entriesDir);
   }
 
@@ -493,21 +582,13 @@ function createFileWatcher(
   host: IndexHost,
   refreshViews: () => void
 ): vscode.Disposable | undefined {
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-  if (!workspaceFolder) {
+  const blogDir = resolveBlogDir();
+  if (!blogDir) {
     return undefined;
   }
-
-  const config = vscode.workspace.getConfiguration("vsJournal");
-  const blogPath = config.get<string>("blogPath", "./blog");
-  const blogDir = path.resolve(workspaceFolder.uri.fsPath, blogPath);
-  if (!isPathInside(blogDir, workspaceFolder.uri.fsPath)) {
-    return undefined;
-  }
-  const blogPattern = path.join(blogPath, "entries", "**", "*.md");
 
   const fileWatcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(workspaceFolder, blogPattern)
+    new vscode.RelativePattern(vscode.Uri.file(blogDir), path.join("entries", "**", "*.md"))
   );
 
   async function indexFile(uri: vscode.Uri) {
@@ -567,6 +648,41 @@ function createFileWatcher(
   );
 
   return vscode.Disposable.from(fileWatcher, renameWatcher, saveWatcher);
+}
+
+// Recursive watcher over the media directory. Rebound by the caller
+// whenever vsJournal.blogPath changes, and again after the first
+// successful upload -- a watcher created before media/ existed may
+// never have started watching it, since it isn't created merely by
+// activation.
+async function createMediaWatcher(
+  onMediaChanged: () => void
+): Promise<vscode.Disposable | undefined> {
+  const mediaDir = await resolveMediaDir();
+  if (!mediaDir) {
+    return undefined;
+  }
+
+  const watcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(vscode.Uri.file(mediaDir), "**/*")
+  );
+  watcher.onDidCreate(onMediaChanged);
+  watcher.onDidChange(onMediaChanged);
+  watcher.onDidDelete(onMediaChanged);
+
+  const renameWatcher = vscode.workspace.onDidRenameFiles((event) => {
+    for (const file of event.files) {
+      if (
+        isPathInside(file.oldUri.fsPath, mediaDir) ||
+        isPathInside(file.newUri.fsPath, mediaDir)
+      ) {
+        onMediaChanged();
+        return;
+      }
+    }
+  });
+
+  return vscode.Disposable.from(watcher, renameWatcher);
 }
 
 export function deactivate(): Thenable<void> | undefined {
