@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-16
+
+### Changed
+
+- **Breaking:** raised the minimum supported VS Code version from 1.74.0 to
+  1.125.0 (`engines.vscode`). The extension can no longer be installed on
+  older VS Code releases.
+- Migrated the ESLint configuration from `.eslintrc.json` to flat config
+  (`eslint.config.js`), upgrading `eslint` to ^10.8.1 and
+  `@typescript-eslint/eslint-plugin`/`@typescript-eslint/parser` to ^8.67.0.
+- Upgraded `typescript` to ^6.0.3, `@types/node` to ^25.9.5, `@types/vscode`
+  to 1.125.0, and `lint-staged` to ^16.4.0.
+
+### Removed
+
+- The deprecated `@types/moment` stub package; `moment` ships its own type
+  definitions.
+
 ## [1.1.0] - 2026-08-16
 
 ### Added

@@ -19,7 +19,7 @@ commands when needed.
 - `npm test` is an alias for the QA gate.
 
 `VSCODE_TEST_VERSION` selects the VS Code build for acceptance tests. It
-defaults to `stable`; set it to a specific version such as `1.74.3` when
+defaults to `stable`; set it to a specific version such as `1.125.0` when
 checking the minimum supported engine.
 
 ## Expensive and diagnostic checks

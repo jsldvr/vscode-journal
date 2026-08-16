@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs-extra";
 import * as path from "path";
-import * as moment from "moment";
+import moment = require("moment");
 import { BlogIndex } from "./blogIndex";
 import { SearchViewProvider } from "./searchView";
 import { hasSymlinkedAncestor } from "./mediaLibrary";

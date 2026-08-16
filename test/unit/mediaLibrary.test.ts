@@ -392,18 +392,28 @@ suite("mediaLibrary", () => {
   // -- both mediaLibrary.ts and this test resolve the same singleton via
   // Node's require cache -- to force a deterministic non-ENOENT error
   // out of lstat, then restore it immediately after.
+  //
+  // Mutation has to go through a plain require() rather than the `fs`
+  // namespace-import binding above: under esModuleInterop (mandatory
+  // since TypeScript 6), `import * as fs` compiles to a getter-wrapped
+  // copy whose properties are read-only and merely forward to the
+  // underlying require()'d object -- so patching *that* object is what
+  // both this test and mediaLibrary.ts's own `import * as fs` binding
+  // will observe.
+  const fsExtraModule: typeof fs = require("fs-extra");
+
   async function withPatchedLstat<T>(
     error: NodeJS.ErrnoException,
     run: () => Promise<T>
   ): Promise<T> {
-    const original = fs.lstat;
-    (fs as unknown as { lstat: unknown }).lstat = async () => {
+    const original = fsExtraModule.lstat;
+    (fsExtraModule as unknown as { lstat: unknown }).lstat = async () => {
       throw error;
     };
     try {
       return await run();
     } finally {
-      (fs as unknown as { lstat: unknown }).lstat = original;
+      (fsExtraModule as unknown as { lstat: unknown }).lstat = original;
     }
   }
 
@@ -421,8 +431,11 @@ suite("mediaLibrary", () => {
     failOn: (dir: string) => boolean,
     run: () => Promise<T>
   ): Promise<T> {
-    const original = fs.readdir;
-    (fs as unknown as { readdir: unknown }).readdir = async (dir: string, options: unknown) => {
+    const original = fsExtraModule.readdir;
+    (fsExtraModule as unknown as { readdir: unknown }).readdir = async (
+      dir: string,
+      options: unknown
+    ) => {
       if (failOn(dir)) {
         throw error;
       }
@@ -431,7 +444,7 @@ suite("mediaLibrary", () => {
     try {
       return await run();
     } finally {
-      (fs as unknown as { readdir: unknown }).readdir = original;
+      (fsExtraModule as unknown as { readdir: unknown }).readdir = original;
     }
   }
 
