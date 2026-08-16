@@ -416,6 +416,56 @@ suite("mediaLibrary", () => {
     );
   });
 
+  async function withPatchedReaddir<T>(
+    error: NodeJS.ErrnoException,
+    failOn: (dir: string) => boolean,
+    run: () => Promise<T>
+  ): Promise<T> {
+    const original = fs.readdir;
+    (fs as unknown as { readdir: unknown }).readdir = async (dir: string, options: unknown) => {
+      if (failOn(dir)) {
+        throw error;
+      }
+      return original(dir, options as never);
+    };
+    try {
+      return await run();
+    } finally {
+      (fs as unknown as { readdir: unknown }).readdir = original;
+    }
+  }
+
+  test("scanMediaDirectory propagates a readdir failure on the media root itself instead of reporting a false empty library", async () => {
+    const mediaRoot = path.join(tempDir, "media");
+    await fs.ensureDir(mediaRoot);
+    const permissionError = Object.assign(new Error("EACCES"), { code: "EACCES" });
+
+    await withPatchedReaddir(
+      permissionError,
+      (dir) => path.resolve(dir) === path.resolve(mediaRoot),
+      () => assert.rejects(() => scanMediaDirectory(mediaRoot))
+    );
+  });
+
+  test("scanMediaDirectory skips (rather than fails) a readdir failure on a nested subdirectory", async () => {
+    const mediaRoot = path.join(tempDir, "media");
+    const unreadableDir = path.join(mediaRoot, "unreadable");
+    await fs.ensureDir(unreadableDir);
+    await fs.writeFile(path.join(mediaRoot, "root-file.png"), "x");
+    await fs.writeFile(path.join(unreadableDir, "nested.png"), "x");
+    const permissionError = Object.assign(new Error("EACCES"), { code: "EACCES" });
+
+    const files = await withPatchedReaddir(
+      permissionError,
+      (dir) => path.resolve(dir) === path.resolve(unreadableDir),
+      () => scanMediaDirectory(mediaRoot)
+    );
+    assert.deepStrictEqual(
+      files.map((f) => f.path),
+      ["root-file.png"]
+    );
+  });
+
   test("resolveContainedMediaFilePath propagates a non-ENOENT lstat failure on the media root", async () => {
     const mediaRoot = path.join(tempDir, "media");
     const permissionError = Object.assign(new Error("EACCES"), { code: "EACCES" });

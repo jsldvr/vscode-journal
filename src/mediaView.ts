@@ -286,11 +286,14 @@ export class MediaController {
   // never renders from stale data: a file that has disappeared, become
   // unsafe, or been excluded is shown as unavailable instead.
   private async openDetailsFor(relativePath: string): Promise<void> {
+    // mediaDir can already be undefined here (a blogPath change or a
+    // newly-unsafe ancestor can land between the grid rendering the
+    // tile and the click being handled) -- that must still surface as
+    // an explicit unavailable selection, the same as a file that
+    // disappeared from a valid root, rather than silently doing
+    // nothing in response to a click the user just made.
     const mediaDir = await this.deps.getMediaDir();
-    if (!mediaDir) {
-      return;
-    }
-    const file = await this.lookupFile(mediaDir, relativePath);
+    const file = mediaDir ? await this.lookupFile(mediaDir, relativePath) : undefined;
     if (!this.detailsPanel) {
       this.detailsPanel = new MediaDetailsPanel(
         (message, reply) => void this.performAction(message, reply),
@@ -299,7 +302,7 @@ export class MediaController {
         }
       );
     }
-    if (file) {
+    if (file && mediaDir) {
       this.detailsPanel.show(file, mediaDir);
     } else {
       this.detailsPanel.showUnavailable();
@@ -330,6 +333,14 @@ export class MediaController {
     relativePath: string,
     reply: ReplyFn
   ): Promise<string | undefined> {
+    const result = await this.resolveOrReportMissingWithRoot(relativePath, reply);
+    return result?.resolved;
+  }
+
+  private async resolveOrReportMissingWithRoot(
+    relativePath: string,
+    reply: ReplyFn
+  ): Promise<{ mediaDir: string; resolved: string } | undefined> {
     const mediaDir = await this.deps.getMediaDir();
     if (!mediaDir) {
       return undefined;
@@ -343,7 +354,7 @@ export class MediaController {
       });
       return undefined;
     }
-    return resolved;
+    return { mediaDir, resolved };
   }
 
   private async openFile(relativePath: string, reply: ReplyFn): Promise<void> {
@@ -374,11 +385,11 @@ export class MediaController {
   }
 
   private async deleteFile(relativePath: string, reply: ReplyFn): Promise<void> {
-    const resolved = await this.resolveOrReportMissing(relativePath, reply);
-    if (!resolved) {
+    const initial = await this.resolveOrReportMissingWithRoot(relativePath, reply);
+    if (!initial) {
       return;
     }
-    const name = path.basename(resolved);
+    const name = path.basename(initial.resolved);
     const choice = await vscode.window.showWarningMessage(
       `Delete "${name}"? This action cannot be undone.`,
       { modal: true },
@@ -388,19 +399,23 @@ export class MediaController {
       return;
     }
 
-    // Re-resolve immediately before deleting: the file could have been
-    // deleted, replaced, or swapped for a directory/symlink during the
-    // modal pause. resolveContainedMediaFilePath is pure given the same
-    // inputs, so a still-valid target resolves to the identical path;
-    // anything else means the world changed underneath the selection
-    // and deletion must fail closed rather than act on whatever is now
-    // at that path. fs.unlink (not a recursive remove) additionally
-    // refuses outright if the target somehow became a directory.
+    // Re-resolve immediately before deleting, against the SAME media
+    // root captured before the modal: the file could have been deleted,
+    // replaced, or swapped for a directory/symlink during the modal
+    // pause, or vsJournal.blogPath could have changed to point at an
+    // entirely different blog while the modal was open. Requiring both
+    // the media root and the resolved absolute path to match the
+    // pre-modal values closes that gap -- without it, a relativePath
+    // that happens to also exist under a *different* blog's media root
+    // would be deleted from that unrelated blog instead of aborting.
+    // fs.unlink (not a recursive remove) additionally refuses outright
+    // if the target somehow became a directory.
     const mediaDir = await this.deps.getMediaDir();
-    const revalidated = mediaDir
-      ? await resolveContainedMediaFilePath(mediaDir, relativePath)
-      : undefined;
-    if (!revalidated) {
+    const revalidated =
+      mediaDir === initial.mediaDir
+        ? await resolveContainedMediaFilePath(mediaDir, relativePath)
+        : undefined;
+    if (!revalidated || revalidated !== initial.resolved) {
       reply({
         type: "mediaStatus",
         message: `"${name}" changed before deletion could complete; nothing was deleted.`,

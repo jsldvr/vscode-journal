@@ -1,5 +1,6 @@
 import * as assert from "assert";
 import * as fs from "fs-extra";
+import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { MediaController, MediaFileWire } from "../../../src/mediaView";
@@ -249,5 +250,84 @@ suite("Media Library", function () {
     assert.strictEqual(replies.length, 1);
     assert.strictEqual(replies[0].type, "mediaStatus");
     assert.strictEqual(replies[0].isError, true);
+  });
+
+  test("selecting a tile whose media root is unavailable still opens the details panel in its unavailable state, instead of doing nothing (unsafe-root-selection regression)", async () => {
+    await activateExtension();
+    const controller = new MediaController(
+      {
+        getMediaDir: async () => undefined,
+        onMediaDirEnsured: () => undefined,
+        requestFullRefresh: async () => undefined,
+      },
+      () => undefined
+    );
+    try {
+      await controller.dispatch({ type: "mediaSelect", path: "photo.png" });
+      assert.strictEqual(
+        await waitFor(isMediaDetailsTabActive, 2000),
+        true,
+        "an unavailable media root must still open the details panel in its unavailable state, not silently do nothing in response to the click"
+      );
+    } finally {
+      await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    }
+  });
+
+  async function withAutoConfirmedDelete<T>(run: () => Promise<T>): Promise<T> {
+    const original = vscode.window.showWarningMessage;
+    (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage =
+      async () => "Delete";
+    try {
+      return await run();
+    } finally {
+      (vscode.window as unknown as { showWarningMessage: unknown }).showWarningMessage = original;
+    }
+  }
+
+  test("delete aborts instead of removing a same-named file from a different blog root if the media root changes while the confirmation modal is open (cross-root-delete regression)", async () => {
+    const rootA = await fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-media-a-"));
+    const rootB = await fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-media-b-"));
+    try {
+      await fs.writeFile(path.join(rootA, "photo.png"), "a-content");
+      await fs.writeFile(path.join(rootB, "photo.png"), "b-content");
+
+      // Simulates vsJournal.blogPath changing to an unrelated blog while
+      // the "Delete?" modal is open: the pre-modal lookup resolves
+      // against rootA, but the post-modal revalidation sees rootB.
+      let calls = 0;
+      const controller = new MediaController(
+        {
+          getMediaDir: async () => (calls++ === 0 ? rootA : rootB),
+          onMediaDirEnsured: () => undefined,
+          requestFullRefresh: async () => undefined,
+        },
+        () => undefined
+      );
+
+      const replies: Record<string, unknown>[] = [];
+      await withAutoConfirmedDelete(() =>
+        controller.performAction({ type: "mediaDelete", path: "photo.png" }, (reply) =>
+          replies.push(reply)
+        )
+      );
+
+      assert.strictEqual(replies.length, 1);
+      assert.strictEqual(replies[0].type, "mediaStatus");
+      assert.strictEqual(replies[0].isError, true);
+      assert.strictEqual(
+        await fs.pathExists(path.join(rootA, "photo.png")),
+        true,
+        "the file under the original (pre-modal) root must survive"
+      );
+      assert.strictEqual(
+        await fs.pathExists(path.join(rootB, "photo.png")),
+        true,
+        "the same-named file under the new (post-modal) root must not be touched either"
+      );
+    } finally {
+      await fs.remove(rootA);
+      await fs.remove(rootB);
+    }
   });
 });

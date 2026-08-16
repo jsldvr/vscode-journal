@@ -153,6 +153,15 @@ async function walk(
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch (error) {
+    // A failure to read mediaRoot itself (e.g. EACCES) must propagate
+    // like every other root-level failure here, or scanMediaDirectory
+    // silently reports a false empty library instead of surfacing the
+    // load failure. A failure reading a *nested* subdirectory is still
+    // skipped deliberately -- one unreadable subfolder should not blank
+    // out an otherwise-successful scan of the rest of the tree.
+    if (dir === mediaRoot) {
+      throw error;
+    }
     console.error(`VS Journal: failed to read media directory ${dir}:`, error);
     return;
   }
