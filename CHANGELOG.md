@@ -7,6 +7,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-16
+
+### Added
+
+- A Media library section built into the single Journal sidebar webview,
+  below the entry browse list, for browsing, uploading, and managing files
+  under `<blogPath>/media` (a sibling of `entries/`, created lazily on first
+  upload). The section has its own pinned toolbar (search, a type filter --
+  All/Images/Audio/Video/Documents, Upload, and Refresh) and a responsive
+  thumbnail grid with real image previews and labeled placeholders for other
+  types.
+- An editor-area details view (`vsJournal.mediaDetails`) that opens when a
+  media tile is selected, showing a preview, filename, relative path, type,
+  size, and last-modified time, plus Copy Path, Open, Reveal in File
+  Explorer/Finder, and Delete actions. Selecting another tile reuses the same
+  tab; nothing is ever auto-selected on load, refresh, or upload.
+- `Journal: Upload Media` and `Journal: Refresh Media Library` commands,
+  also available as toolbar buttons in the Media section.
+- A recursive file watcher on `media/` that keeps the library in sync with
+  files added, changed, deleted, or renamed on disk.
+- Collision-safe uploads: colliding filenames are renamed with a numeric
+  suffix (`image-2.png`, `image-3.png`, ...) instead of overwriting existing
+  files.
+- Symlink- and traversal-hardened filesystem handling for the media
+  directory: a symlinked media root or a symlinked ancestor between the
+  workspace root and the media root is treated as unsafe and disables the
+  webview resource root rather than exposing it; individual file resolution
+  rejects traversal, absolute paths, non-regular files, and symlinked
+  intermediate directories; delete re-validates its target immediately
+  before removal to close the TOCTOU window.
+
 ## [1.0.0] - 2026-07-26
 
 ### Added

@@ -3,6 +3,8 @@ import * as crypto from "crypto";
 import { BlogIndex, InvalidSearchPatternError, SearchOptions, SearchResponse } from "./blogIndex";
 import { validateWebviewMessage, InboundWebviewMessage } from "./webviewSupport";
 import { groupEntriesByYearMonth } from "./entryGrouping";
+import { MediaController, MediaControllerDeps, MEDIA_BODY_HTML, MEDIA_SCRIPT, MEDIA_STYLES } from "./mediaView";
+import { validateMediaMessage } from "./mediaWebviewSupport";
 
 export interface SearchViewDeps {
   getIndex(): BlogIndex | undefined;
@@ -11,13 +13,17 @@ export interface SearchViewDeps {
 }
 
 // The merged sidebar view: a persistent search bar (with Match
-// Case/Whole Word/Regex toggles) pinned at the top and, directly below
-// it in the same webview, either the Year -> Month -> Entry browse list
-// (empty query), search results (active query), or an empty-state CTA
-// (zero entries). Replaces the previous split between this webview and
-// the separate vsJournal.explorer TreeView -- VS Code only renders a
-// collapsible section header when a container has more than one view,
-// so folding entry browsing into this single view is what removes it.
+// Case/Whole Word/Regex toggles) pinned at the top, the Year -> Month
+// -> Entry browse list / search results / empty-state CTA directly
+// below it, and -- below that, in the same webview -- the Media
+// library section (search/filter/upload/refresh toolbar, thumbnail
+// grid, details pane). There is deliberately only one contributed view
+// under the vsJournal container: VS Code only renders a collapsible
+// section header when a container has more than one view, and a
+// second Media view would also mean a second acquireVsCodeApi()
+// context with no shared state -- both are avoided by composing the
+// media UI into this single webview/message-channel/outbox instead of
+// standing up vsJournal.media as its own WebviewViewProvider.
 // All strings rendered in the webview go through DOM textContent (never
 // innerHTML), and every message crossing the boundary is validated
 // before use.
@@ -30,25 +36,39 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
   private pendingFocus = false;
   private webviewReady = false;
   private outbox: Record<string, unknown>[] = [];
+  private readonly mediaController: MediaController;
 
-  constructor(private readonly deps: SearchViewDeps) {}
+  constructor(
+    private readonly deps: SearchViewDeps,
+    mediaDeps: Omit<MediaControllerDeps, "requestFullRefresh">
+  ) {
+    this.mediaController = new MediaController(
+      { ...mediaDeps, requestFullRefresh: () => this.refreshMedia() },
+      (message) => this.post(message)
+    );
+  }
 
-  resolveWebviewView(view: vscode.WebviewView): void {
+  async resolveWebviewView(view: vscode.WebviewView): Promise<void> {
     this.view = view;
     this.webviewReady = false;
     this.outbox = [];
+    this.mediaController.bind(view);
+    // Resolved before enableScripts/html are ever assigned so the
+    // webview's own resource fetches (image previews) are never raced
+    // against an in-flight localResourceRoots update.
+    const mediaResourceRoots = await this.mediaController.resourceRoots();
     view.webview.options = {
       enableScripts: true,
-      // The view is fully self-contained: no local or remote resources.
-      localResourceRoots: [],
+      localResourceRoots: mediaResourceRoots,
     };
-    view.webview.html = buildSearchHtml();
+    view.webview.html = buildSearchHtml(view.webview);
     view.webview.onDidReceiveMessage((raw) => this.handleMessage(raw));
     view.onDidDispose(() => {
       if (this.view === view) {
         this.view = undefined;
         this.webviewReady = false;
         this.outbox = [];
+        this.mediaController.unbind();
       }
     });
   }
@@ -82,7 +102,8 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 
   // Reloads the browse-list entries and, if a query is active, re-runs
   // it. Called whenever the index changes: watcher updates, a new
-  // entry, a rescan, or a blog-path change.
+  // entry, a rescan, or a blog-path change. Entries-only: never implies
+  // a media rescan (see refreshMedia()).
   refresh(): void {
     void this.pushEntries();
     if (this.view && this.lastQuery.length > 0) {
@@ -90,12 +111,46 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // Re-scans the media directory and pushes a fresh snapshot, also
+  // recomputing localResourceRoots in case the media directory itself
+  // moved (blog-path change). Called by the media watcher and the
+  // Upload/Refresh Media Library commands.
+  async refreshMedia(): Promise<void> {
+    if (this.view) {
+      const mediaResourceRoots = await this.mediaController.resourceRoots();
+      this.view.webview.options = {
+        enableScripts: true,
+        localResourceRoots: mediaResourceRoots,
+      };
+    }
+    await this.mediaController.pushState();
+  }
+
+  async uploadMedia(): Promise<void> {
+    await this.mediaController.upload();
+  }
+
   private handleMessage(raw: unknown): void {
-    const message = validateWebviewMessage(raw);
-    if (!message) {
+    const entryMessage = validateWebviewMessage(raw);
+    if (entryMessage) {
+      void this.dispatchMessage(entryMessage);
       return;
     }
-    void this.dispatchMessage(message);
+    // Entry and media message vocabularies are disjoint (media types
+    // are "media"-prefixed), so trying the entry validator first is
+    // unambiguous -- anything it rejects is tried against the media
+    // validator next.
+    const mediaMessage = validateMediaMessage(raw);
+    if (mediaMessage) {
+      this.mediaController.dispatch(mediaMessage).catch((error) => {
+        console.error(`VS Journal: media "${mediaMessage.type}" action failed:`, error);
+        this.post({
+          type: "mediaStatus",
+          message: "That action could not be completed.",
+          isError: true,
+        });
+      });
+    }
   }
 
   private async dispatchMessage(message: InboundWebviewMessage): Promise<void> {
@@ -123,7 +178,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
         await this.deps.createNewEntry();
         return;
       case "ready":
-        this.handleWebviewReady();
+        await this.handleWebviewReady();
         return;
     }
   }
@@ -131,7 +186,9 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
   // The webview posts "ready" once its script has registered its
   // message listener; anything sent earlier would have been dropped by
   // the still-loading page, so outbound messages queue until then.
-  private handleWebviewReady(): void {
+  // Shared by both halves of the combined webview: one handshake, one
+  // outbox.
+  private async handleWebviewReady(): Promise<void> {
     this.webviewReady = true;
     const queued = this.outbox;
     this.outbox = [];
@@ -143,6 +200,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
       this.pendingFocus = false;
       this.send({ type: "focus" });
     }
+    void this.mediaController.pushState();
   }
 
   private async pushEntries(): Promise<void> {
@@ -220,18 +278,20 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
-// The webview page: restrictive CSP (no remote or local resources; the
-// inline style and script are authorized only by nonce), VS Code theme
-// variables throughout, and DOM-API rendering with textContent so
-// database- and Markdown-derived text is never parsed as HTML.
-function buildSearchHtml(): string {
+// The webview page: restrictive CSP (no remote content; images load
+// only from this webview's own resource origin, scoped by
+// localResourceRoots to the live media directory; the inline style and
+// script are authorized only by nonce), VS Code theme variables
+// throughout, and DOM-API rendering with textContent so database-,
+// Markdown-, and filesystem-derived text is never parsed as HTML.
+function buildSearchHtml(webview: vscode.Webview): string {
   const nonce = crypto.randomBytes(16).toString("base64");
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+      content="default-src 'none'; img-src ${webview.cspSource}; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Journal</title>
 <style nonce="${nonce}">
@@ -404,6 +464,7 @@ function buildSearchHtml(): string {
     text-decoration: underline;
   }
   .cta:hover { color: var(--vscode-textLink-activeForeground); }
+${MEDIA_STYLES}
 </style>
 </head>
 <body>
@@ -423,7 +484,9 @@ function buildSearchHtml(): string {
   <ul id="results" aria-label="Search results"></ul>
   <div id="browse" aria-label="Journal entries"></div>
   <div id="empty-state"></div>
+${MEDIA_BODY_HTML}
 <script nonce="${nonce}">
+${MEDIA_SCRIPT}
 ${WEBVIEW_SCRIPT}
 </script>
 </body>
@@ -433,7 +496,11 @@ ${WEBVIEW_SCRIPT}
 // Plain-JS webview script. Rendering rule: every dynamic string is
 // assigned through textContent; snippet highlight markers (control
 // characters \\u0001/\\u0002 from the index) are converted to <mark>
-// elements by splitting, never by HTML parsing.
+// elements by splitting, never by HTML parsing. Owns the single
+// acquireVsCodeApi() instance and the single persisted state blob for
+// the whole webview (entries fields at the top level, media fields
+// nested under state.media -- see initMedia in mediaView.ts's
+// MEDIA_SCRIPT) and the single "ready" handshake shared by both halves.
 const WEBVIEW_SCRIPT = `
 (function () {
   var vscode = acquireVsCodeApi();
@@ -462,6 +529,8 @@ const WEBVIEW_SCRIPT = `
   function save() {
     vscode.setState(state);
   }
+
+  var media = initMedia(vscode, state, save);
 
   function setStatus(text, isError) {
     statusEl.textContent = text;
@@ -786,6 +855,7 @@ const WEBVIEW_SCRIPT = `
       }
     },
   };
+  Object.assign(INBOUND_HANDLERS, media.handlers);
 
   window.addEventListener("message", function (event) {
     var message = event.data;

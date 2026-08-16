@@ -13,14 +13,14 @@ A simple blog extension for VS Code that stores entries in markdown format with 
 - **SQLite Index**: A repository-local SQLite/FTS5 database indexes titles, content, and tags
 - Entries open as plain markdown, so VS Code's own markdown preview and editing
   tools apply
-
-Not yet implemented: drag-and-drop image support into the `assets/` folder.
+- **Media Library**: A Media section built into the same Journal sidebar view,
+  below the entry browse list, for browsing, uploading, and managing images,
+  audio, video, and other files stored in `media/`
 
 ## Directory Structure
 
 ```text
 blog/
-├── assets/              # Image and media files
 ├── entries/             # Blog entries organized by date
 │   ├── .vs-journal/     # Generated search index (keep out of Git)
 │   │   └── index.sqlite3
@@ -28,6 +28,7 @@ blog/
 │       └── MM/          # Month folders
 │           └── DD/      # Day folders
 │               └── title.md  # Individual entries
+└── media/                # Images, audio, video, and other files
 ```
 
 Markdown is the source of truth. Everything under `entries/.vs-journal/` is
@@ -67,6 +68,39 @@ section header between them.
 - Press Enter to search; the Clear button next to the input resets the view
   back to the browse list (also available as `Journal: Clear Search` from
   the Command Palette). `Journal: Search Blog` focuses the search input.
+
+## Media library
+
+The Journal sidebar view has a Media section below the entry browse list, in
+the same panel and the same webview -- there is still only one contributed
+view in the activity bar. It shows the contents of `<blogPath>/media` (a
+sibling of `entries/`, created automatically the first time you upload a
+file -- it is never created merely by opening the extension).
+
+- A toolbar (search field, a type filter -- All / Images / Audio / Video /
+  Documents/Other -- an Upload button, and a Refresh button) stays pinned to
+  the top of the Media section as you scroll within it.
+- Files render as a responsive thumbnail grid: images show real previews,
+  everything else shows a labeled placeholder. Search matches filenames and
+  paths case-insensitively; results sort newest-modified first.
+- Clicking (or keyboard-activating) a tile opens its details in an editor-area
+  tab -- preview, filename, `media/<relative-path>`, type, size, and
+  last-modified time, plus Copy Path, Open, Reveal in File Explorer/Finder,
+  and Delete actions -- titled with the filename. Selecting another tile
+  reuses and updates that same tab rather than opening a new one. Delete
+  always asks for confirmation first, only removes the one selected file,
+  and replaces the tab's content with an unavailable state afterward.
+  Nothing is ever selected automatically: opening or refreshing the sidebar,
+  or uploading files, never opens or changes this tab on its own.
+- Upload opens a multi-select file picker and copies the chosen files into
+  `media/`, preserving filenames. A name collision never overwrites an
+  existing file -- colliding uploads are renamed with a numeric suffix
+  (`image-2.png`, `image-3.png`, ...).
+- The Media section watches `media/` recursively and refreshes automatically
+  when files are added, changed, deleted, or renamed on disk.
+- `Journal: Upload Media` and `Journal: Refresh Media Library` are available
+  from the Command Palette; the same actions are also available as buttons
+  in the Media toolbar itself.
 
 ## Git and the generated index
 

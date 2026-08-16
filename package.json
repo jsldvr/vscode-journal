@@ -2,7 +2,7 @@
   "name": "vscode-journal",
   "displayName": "Journal",
   "description": "A simple blog extension that stores entries in markdown, with a tree view browser and full-text search",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "jsldvr",
   "license": "MIT",
   "repository": {
@@ -31,6 +31,8 @@
     "onCommand:vsJournal.searchByTag",
     "onCommand:vsJournal.setBlogPath",
     "onCommand:vsJournal.rescanEntries",
+    "onCommand:vsJournal.uploadMedia",
+    "onCommand:vsJournal.refreshMediaLibrary",
     "onView:vsJournal.search"
   ],
   "main": "./out/extension.js",
@@ -87,6 +89,18 @@
         "title": "Rescan All Entries",
         "category": "Journal",
         "icon": "$(sync)"
+      },
+      {
+        "command": "vsJournal.uploadMedia",
+        "title": "Upload Media",
+        "category": "Journal",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "vsJournal.refreshMediaLibrary",
+        "title": "Refresh Media Library",
+        "category": "Journal",
+        "icon": "$(refresh)"
       }
     ],
     "views": {
@@ -143,6 +157,12 @@
         {
           "command": "vsJournal.searchByTag",
           "when": "false"
+        },
+        {
+          "command": "vsJournal.uploadMedia"
+        },
+        {
+          "command": "vsJournal.refreshMediaLibrary"
         }
       ]
     },
@@ -214,12 +234,23 @@
     "fast-check": "^3.23.2",
     "husky": "^9.1.7",
     "lint-staged": "^13.2.3",
-    "mocha": "^11.7.6",
+    "mocha": "^11.3.0",
     "typescript": "^4.9.4"
   },
   "dependencies": {
     "fs-extra": "^11.4.0",
     "moment": "^2.29.4",
     "sqlite3": "6.0.1"
+  },
+  "overrides": {
+    "@types/node": "16.x",
+    "@azure/core-util": "1.13.1",
+    "@azure/core-auth": "1.10.1",
+    "@azure/core-client": "1.10.2",
+    "@azure/core-rest-pipeline": "1.23.0",
+    "@azure/core-tracing": "1.3.1",
+    "@azure/abort-controller": "2.1.2",
+    "@azure/logger": "1.3.0",
+    "@typespec/ts-http-runtime": "0.3.4"
   }
 }
