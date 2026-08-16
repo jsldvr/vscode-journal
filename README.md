@@ -83,10 +83,15 @@ file -- it is never created merely by opening the extension).
 - Files render as a responsive thumbnail grid: images show real previews,
   everything else shows a labeled placeholder. Search matches filenames and
   paths case-insensitively; results sort newest-modified first.
-- Selecting a file shows its preview, filename, `media/<relative-path>`,
-  type, size, and last-modified time, plus Copy Path, Open, Reveal in File
-  Explorer/Finder, and Delete actions. Delete always asks for confirmation
-  first and only removes the one selected file.
+- Clicking (or keyboard-activating) a tile opens its details in an editor-area
+  tab -- preview, filename, `media/<relative-path>`, type, size, and
+  last-modified time, plus Copy Path, Open, Reveal in File Explorer/Finder,
+  and Delete actions -- titled with the filename. Selecting another tile
+  reuses and updates that same tab rather than opening a new one. Delete
+  always asks for confirmation first, only removes the one selected file,
+  and replaces the tab's content with an unavailable state afterward.
+  Nothing is ever selected automatically: opening or refreshing the sidebar,
+  or uploading files, never opens or changes this tab on its own.
 - Upload opens a multi-select file picker and copies the chosen files into
   `media/`, preserving filenames. A name collision never overwrites an
   existing file -- colliding uploads are renamed with a numeric suffix

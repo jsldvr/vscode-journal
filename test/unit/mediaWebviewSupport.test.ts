@@ -10,6 +10,10 @@ suite("mediaWebviewSupport", () => {
       type: "mediaUpload",
     });
     assert.deepStrictEqual(
+      validateMediaMessage({ type: "mediaSelect", path: "images/header.png" }),
+      { type: "mediaSelect", path: "images/header.png" }
+    );
+    assert.deepStrictEqual(
       validateMediaMessage({ type: "mediaOpen", path: "images/header.png" }),
       { type: "mediaOpen", path: "images/header.png" }
     );
@@ -49,6 +53,11 @@ suite("mediaWebviewSupport", () => {
       undefined
     );
     assert.strictEqual(validateMediaMessage({ type: "mediaOpen" }), undefined);
+    assert.strictEqual(validateMediaMessage({ type: "mediaSelect" }), undefined);
+    assert.strictEqual(
+      validateMediaMessage({ type: "mediaSelect", path: "" }),
+      undefined
+    );
     assert.strictEqual(
       validateMediaMessage({ type: "mediaDelete", path: 42 }),
       undefined

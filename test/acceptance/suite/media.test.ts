@@ -75,4 +75,27 @@ suite("Media Library", function () {
       await config.update("blogPath", originalPath, vscode.ConfigurationTarget.Workspace);
     }
   });
+
+  test("no media details editor panel opens merely from activation, focusing the view, or refreshing", async () => {
+    await activateExtension();
+    await vscode.commands.executeCommand("vsJournal.search.focus");
+    await vscode.commands.executeCommand("vsJournal.refreshMediaLibrary");
+
+    // The details panel is an editor-area vscode.WebviewPanel, which
+    // shows up in tabGroups regardless of visibility; it must only ever
+    // be created in response to an explicit tile selection, never as a
+    // side effect of activation, focusing the sidebar, or refreshing.
+    const detailsTabs = vscode.window.tabGroups.all
+      .flatMap((group) => group.tabs)
+      .filter(
+        (tab) =>
+          tab.input instanceof vscode.TabInputWebview &&
+          tab.input.viewType.includes("mediaDetails")
+      );
+    assert.strictEqual(
+      detailsTabs.length,
+      0,
+      "no media details editor panel should exist without an explicit tile selection"
+    );
+  });
 });

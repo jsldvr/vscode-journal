@@ -21,6 +21,15 @@ export interface MediaUploadMessage {
   type: "mediaUpload";
 }
 
+// Sent by the sidebar grid when a tile is clicked/keyboard-activated.
+// Stateless on the sidebar side -- selection is not tracked or
+// persisted there; this just requests that the editor-area details
+// panel be opened/updated for this file.
+export interface MediaSelectMessage {
+  type: "mediaSelect";
+  path: string;
+}
+
 export interface MediaOpenMessage {
   type: "mediaOpen";
   path: string;
@@ -44,6 +53,7 @@ export interface MediaDeleteMessage {
 export type InboundMediaMessage =
   | MediaRefreshMessage
   | MediaUploadMessage
+  | MediaSelectMessage
   | MediaOpenMessage
   | MediaRevealMessage
   | MediaCopyPathMessage
@@ -54,7 +64,7 @@ type MediaMessageValidator = (
 ) => InboundMediaMessage | undefined;
 
 function pathMessageValidator(
-  type: "mediaOpen" | "mediaReveal" | "mediaCopyPath" | "mediaDelete"
+  type: "mediaSelect" | "mediaOpen" | "mediaReveal" | "mediaCopyPath" | "mediaDelete"
 ): MediaMessageValidator {
   return (message) => {
     const mediaPath = boundedPathString(message.path);
@@ -65,6 +75,7 @@ function pathMessageValidator(
 const MEDIA_MESSAGE_VALIDATORS: Record<string, MediaMessageValidator> = {
   mediaRefresh: () => ({ type: "mediaRefresh" }),
   mediaUpload: () => ({ type: "mediaUpload" }),
+  mediaSelect: pathMessageValidator("mediaSelect"),
   mediaOpen: pathMessageValidator("mediaOpen"),
   mediaReveal: pathMessageValidator("mediaReveal"),
   mediaCopyPath: pathMessageValidator("mediaCopyPath"),

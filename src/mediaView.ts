@@ -9,8 +9,15 @@ import {
   scanMediaDirectory,
 } from "./mediaLibrary";
 import { normalizeEntryPath } from "./pathUtils";
-import { InboundMediaMessage } from "./mediaWebviewSupport";
+import {
+  InboundMediaMessage,
+  MediaCopyPathMessage,
+  MediaDeleteMessage,
+  MediaOpenMessage,
+  MediaRevealMessage,
+} from "./mediaWebviewSupport";
 import { MediaFile } from "./types";
+import { MediaDetailsPanel } from "./mediaDetailsPanel";
 
 export interface MediaControllerDeps {
   // undefined => no workspace open, the configured blog path resolves
@@ -38,22 +45,32 @@ export interface MediaControllerDeps {
   requestFullRefresh(): Promise<void>;
 }
 
-interface MediaFileWire extends MediaFile {
+export interface MediaFileWire extends MediaFile {
   previewUri?: string;
   sizeLabel: string;
 }
 
-// Owns the media half of the combined Journal webview: filesystem
-// state, actions, and the outbound "media*" messages. Not a
-// vscode.WebviewViewProvider itself -- there is exactly one contributed
-// view (vsJournal.search), and SearchViewProvider composes this
-// controller into its own single webview/message-channel/outbox rather
-// than standing up a second view. Every action that touches the
-// filesystem (open/reveal/copyPath/delete) re-resolves its path through
-// resolveContainedMediaFilePath immediately before acting; nothing sent
-// by the webview is trusted as an already-safe filesystem path.
+type ReplyFn = (message: Record<string, unknown>) => void;
+type MediaFileActionMessage =
+  | MediaOpenMessage
+  | MediaRevealMessage
+  | MediaCopyPathMessage
+  | MediaDeleteMessage;
+
+// Owns the media half of the combined Journal webview -- the sidebar
+// grid, filesystem state, and the outbound "media*" messages -- plus
+// the lifecycle of the single editor-area details panel a tile
+// selection opens. Not a vscode.WebviewViewProvider itself -- there is
+// exactly one contributed view (vsJournal.search), and SearchViewProvider
+// composes this controller into its own single webview/message-
+// channel/outbox rather than standing up a second view. Every action
+// that touches the filesystem (open/reveal/copyPath/delete) re-resolves
+// its path through resolveContainedMediaFilePath immediately before
+// acting; nothing sent by either webview is trusted as an
+// already-safe filesystem path.
 export class MediaController {
   private view: vscode.WebviewView | undefined;
+  private detailsPanel: MediaDetailsPanel | undefined;
 
   constructor(
     private readonly deps: MediaControllerDeps,
@@ -88,7 +105,10 @@ export class MediaController {
 
   // Re-scans the media directory and pushes a fresh snapshot. Called on
   // "ready", watcher events, after upload/delete, and whenever the blog
-  // path changes.
+  // path changes. Also keeps an open details panel in sync: if its file
+  // is missing from the fresh scan (deleted, excluded, or the whole
+  // root became unsafe), the panel is switched to its unavailable state
+  // rather than continuing to show stale data.
   async pushState(): Promise<void> {
     const mediaDir = await this.deps.getMediaDir();
     if (!mediaDir) {
@@ -97,6 +117,7 @@ export class MediaController {
         reason:
           "No workspace open, the configured blog path is outside the workspace, or the media path is unsafe.",
       });
+      this.detailsPanel?.showUnavailable();
       return;
     }
     try {
@@ -105,6 +126,14 @@ export class MediaController {
         type: "mediaFiles",
         files: files.map((file) => this.toWire(mediaDir, file)),
       });
+      if (this.detailsPanel) {
+        const current = files.find((file) => file.path === this.detailsPanel?.currentPath);
+        if (current) {
+          this.detailsPanel.show(this.toWire(mediaDir, current), mediaDir);
+        } else {
+          this.detailsPanel.showUnavailable();
+        }
+      }
     } catch (error) {
       console.error("VS Journal: failed to scan media directory:", error);
       // Disable rather than just posting a status message: the webview
@@ -118,6 +147,7 @@ export class MediaController {
         type: "mediaDisabled",
         reason: "Failed to load media files. The media directory may be unavailable or unsafe.",
       });
+      this.detailsPanel?.showUnavailable();
     }
   }
 
@@ -173,6 +203,9 @@ export class MediaController {
     // before the previewUris pushState() is about to emit can serve.
     await this.deps.requestFullRefresh();
 
+    // Uploading never selects or opens a file -- the grid simply shows
+    // the new files; the user opens details explicitly, same as any
+    // other tile.
     if (imported.length > 0) {
       this.post({ type: "mediaUploaded", paths: imported });
     }
@@ -185,6 +218,10 @@ export class MediaController {
     }
   }
 
+  // Messages from the sidebar grid: refresh/upload/select. Selecting
+  // never happens implicitly (on load, refresh, or upload) -- only in
+  // response to this explicit "mediaSelect" message, which the sidebar
+  // script sends solely from a tile's click/keyboard-activation handler.
   async dispatch(message: InboundMediaMessage): Promise<void> {
     switch (message.type) {
       case "mediaRefresh":
@@ -198,18 +235,68 @@ export class MediaController {
       case "mediaUpload":
         await this.upload();
         return;
+      case "mediaSelect":
+        await this.openDetailsFor(message.path);
+        return;
+    }
+  }
+
+  // Messages from the details panel: open/reveal/copyPath/delete. Kept
+  // separate from dispatch() (the sidebar's message set) because
+  // replies must go back to whichever webview asked -- the panel here,
+  // never the sidebar -- and because the sidebar no longer has any UI
+  // that sends these.
+  async performAction(message: MediaFileActionMessage, reply: ReplyFn): Promise<void> {
+    switch (message.type) {
       case "mediaOpen":
-        await this.openFile(message.path);
+        await this.openFile(message.path, reply);
         return;
       case "mediaReveal":
-        await this.revealFile(message.path);
+        await this.revealFile(message.path, reply);
         return;
       case "mediaCopyPath":
-        await this.copyPath(message.path);
+        await this.copyPath(message.path, reply);
         return;
       case "mediaDelete":
-        await this.deleteFile(message.path);
+        await this.deleteFile(message.path, reply);
         return;
+    }
+  }
+
+  // Opens (creating on first use) or updates+reveals the single reused
+  // details panel for relativePath. Looked up via a fresh
+  // scanMediaDirectory() rather than any cached list, so the panel
+  // never renders from stale data: a file that has disappeared, become
+  // unsafe, or been excluded is shown as unavailable instead.
+  private async openDetailsFor(relativePath: string): Promise<void> {
+    const mediaDir = await this.deps.getMediaDir();
+    if (!mediaDir) {
+      return;
+    }
+    const file = await this.lookupFile(mediaDir, relativePath);
+    if (!this.detailsPanel) {
+      this.detailsPanel = new MediaDetailsPanel(
+        (message, reply) => void this.performAction(message, reply),
+        () => {
+          this.detailsPanel = undefined;
+        }
+      );
+    }
+    if (file) {
+      this.detailsPanel.show(file, mediaDir);
+    } else {
+      this.detailsPanel.showUnavailable();
+    }
+  }
+
+  private async lookupFile(mediaDir: string, relativePath: string): Promise<MediaFileWire | undefined> {
+    try {
+      const files = await scanMediaDirectory(mediaDir);
+      const match = files.find((file) => file.path === relativePath);
+      return match ? this.toWire(mediaDir, match) : undefined;
+    } catch (error) {
+      console.error("VS Journal: failed to look up media file:", error);
+      return undefined;
     }
   }
 
@@ -222,14 +309,17 @@ export class MediaController {
     return wire;
   }
 
-  private async resolveOrReportMissing(relativePath: string): Promise<string | undefined> {
+  private async resolveOrReportMissing(
+    relativePath: string,
+    reply: ReplyFn
+  ): Promise<string | undefined> {
     const mediaDir = await this.deps.getMediaDir();
     if (!mediaDir) {
       return undefined;
     }
     const resolved = await resolveContainedMediaFilePath(mediaDir, relativePath);
     if (!resolved) {
-      this.post({
+      reply({
         type: "mediaStatus",
         message: "That file is no longer available.",
         isError: true,
@@ -239,35 +329,35 @@ export class MediaController {
     return resolved;
   }
 
-  private async openFile(relativePath: string): Promise<void> {
-    const resolved = await this.resolveOrReportMissing(relativePath);
+  private async openFile(relativePath: string, reply: ReplyFn): Promise<void> {
+    const resolved = await this.resolveOrReportMissing(relativePath, reply);
     if (!resolved) {
       return;
     }
     await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(resolved));
   }
 
-  private async revealFile(relativePath: string): Promise<void> {
-    const resolved = await this.resolveOrReportMissing(relativePath);
+  private async revealFile(relativePath: string, reply: ReplyFn): Promise<void> {
+    const resolved = await this.resolveOrReportMissing(relativePath, reply);
     if (!resolved) {
       return;
     }
     await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(resolved));
   }
 
-  private async copyPath(relativePath: string): Promise<void> {
+  private async copyPath(relativePath: string, reply: ReplyFn): Promise<void> {
     const mediaDir = await this.deps.getMediaDir();
-    const resolved = await this.resolveOrReportMissing(relativePath);
+    const resolved = await this.resolveOrReportMissing(relativePath, reply);
     if (!resolved || !mediaDir) {
       return;
     }
     const relative = normalizeEntryPath(path.relative(mediaDir, resolved));
     await vscode.env.clipboard.writeText(`media/${relative}`);
-    this.post({ type: "mediaStatus", message: `Copied media/${relative} to the clipboard.` });
+    reply({ type: "mediaStatus", message: `Copied media/${relative} to the clipboard.` });
   }
 
-  private async deleteFile(relativePath: string): Promise<void> {
-    const resolved = await this.resolveOrReportMissing(relativePath);
+  private async deleteFile(relativePath: string, reply: ReplyFn): Promise<void> {
+    const resolved = await this.resolveOrReportMissing(relativePath, reply);
     if (!resolved) {
       return;
     }
@@ -294,7 +384,7 @@ export class MediaController {
       ? await resolveContainedMediaFilePath(mediaDir, relativePath)
       : undefined;
     if (!revalidated) {
-      this.post({
+      reply({
         type: "mediaStatus",
         message: `"${name}" changed before deletion could complete; nothing was deleted.`,
         isError: true,
@@ -306,15 +396,20 @@ export class MediaController {
       await fs.unlink(revalidated);
     } catch (error) {
       console.error("VS Journal: failed to delete media file:", error);
-      this.post({
+      reply({
         type: "mediaStatus",
         message: `Failed to delete "${name}".`,
         isError: true,
       });
       return;
     }
+    // Refreshes the sidebar grid; pushState()'s own sync already
+    // switches the panel to its unavailable state since the deleted
+    // file will be missing from the fresh scan. The explicit reply
+    // below then gives the panel a more specific "deleted" message
+    // (applied after, so it is the one actually shown).
     await this.pushState();
-    this.post({ type: "mediaDeleted", path: relativePath });
+    reply({ type: "mediaDeleted", path: relativePath });
   }
 }
 
@@ -343,13 +438,15 @@ export const MEDIA_BODY_HTML = `
     <div id="media-disabled-state"></div>
     <div id="media-empty-state"></div>
     <div id="media-grid" role="list" aria-label="Media files"></div>
-    <div id="media-details" aria-label="Selected media file details"></div>
   </div>
 `;
 
 // CSS for the media section, appended to the shared <style> block in
 // searchView.ts. Reuses the entries webview's .cta class for the
-// "Upload Media" empty-state action (same link-style treatment).
+// "Upload Media" empty-state action (same link-style treatment). There
+// is no details/preview markup here -- selecting a tile opens an
+// editor-area panel (see mediaDetailsPanel.ts) instead of rendering
+// anything below the grid.
 export const MEDIA_STYLES = `
   .section-heading {
     padding: 6px 10px 2px 10px;
@@ -403,7 +500,7 @@ export const MEDIA_STYLES = `
   }
   .icon-button:hover { background: var(--vscode-toolbar-hoverBackground); }
   #media-search:focus-visible, #media-type-filter:focus-visible, .icon-button:focus-visible,
-  .tile:focus-visible, .action:focus-visible {
+  .tile:focus-visible {
     outline: 1px solid var(--vscode-focusBorder);
     outline-offset: 1px;
   }
@@ -439,11 +536,6 @@ export const MEDIA_STYLES = `
     cursor: pointer;
   }
   .tile:hover { background: var(--vscode-list-hoverBackground); }
-  .tile.selected {
-    background: var(--vscode-list-activeSelectionBackground);
-    color: var(--vscode-list-activeSelectionForeground);
-    border-color: var(--vscode-focusBorder);
-  }
   .thumb {
     width: 100%;
     aspect-ratio: 1 / 1;
@@ -472,53 +564,6 @@ export const MEDIA_STYLES = `
     font-size: 0.85em;
     text-align: center;
   }
-  #media-details {
-    padding: 8px 10px 16px 10px;
-    border-top: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border, transparent));
-  }
-  #media-details:empty { display: none; }
-  #media-details .detail-preview {
-    max-width: 100%;
-    max-height: 160px;
-    display: block;
-    margin-bottom: 8px;
-    border-radius: 4px;
-  }
-  #media-details .detail-placeholder {
-    width: 100%;
-    height: 100px;
-    margin-bottom: 8px;
-  }
-  #media-details dl {
-    margin: 0 0 8px 0;
-  }
-  #media-details dt {
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.85em;
-  }
-  #media-details dd {
-    margin: 0 0 6px 0;
-    overflow-wrap: anywhere;
-  }
-  .detail-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-  .action {
-    padding: 3px 8px;
-    color: var(--vscode-button-foreground);
-    background: var(--vscode-button-background);
-    border: none;
-    border-radius: 2px;
-    cursor: pointer;
-  }
-  .action:hover { background: var(--vscode-button-hoverBackground); }
-  .action.danger {
-    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-    background: var(--vscode-button-secondaryBackground, transparent);
-    border: 1px solid var(--vscode-errorForeground);
-  }
 `;
 
 // Plain-JS fragment spliced into the combined webview script in
@@ -527,9 +572,11 @@ export const MEDIA_STYLES = `
 // rather than calling acquireVsCodeApi() a second time, which VS Code
 // does not allow. Rendering rule: every dynamic string (filenames,
 // paths) is assigned through textContent, never innerHTML. Search
-// query, active type filter, and the current selection persist via the
-// shared state so they survive the webview being hidden and shown
-// again; the extension only ever pushes the full file list.
+// query and active type filter persist via the shared state so they
+// survive the webview being hidden and shown again; selection is
+// intentionally NOT part of persisted state -- clicking/activating a
+// tile is a one-off "open details" request (mediaSelect), not
+// something the sidebar tracks, highlights, or restores.
 export const MEDIA_SCRIPT = `
 function initMedia(vscode, state, save) {
   var searchInput = document.getElementById("media-search");
@@ -540,14 +587,12 @@ function initMedia(vscode, state, save) {
   var disabledEl = document.getElementById("media-disabled-state");
   var emptyEl = document.getElementById("media-empty-state");
   var gridEl = document.getElementById("media-grid");
-  var detailsEl = document.getElementById("media-details");
 
   var TYPE_LABELS = { image: "Image", audio: "Audio", video: "Video", document: "Document" };
 
   state.media = state.media || {
     query: "",
     filter: "all",
-    selectedPath: null,
     files: [],
     disabled: false,
     disabledReason: "",
@@ -555,6 +600,9 @@ function initMedia(vscode, state, save) {
   };
   var m = state.media;
   m.files = m.files || [];
+  // Older persisted state may still carry a selectedPath from before
+  // selection moved to the editor area -- never restore it.
+  delete m.selectedPath;
 
   function setStatus(text, isError) {
     statusEl.textContent = text || "";
@@ -571,13 +619,6 @@ function initMedia(vscode, state, save) {
 
   function visibleFiles() {
     return m.files.filter(matchesFilter);
-  }
-
-  function findFile(relativePath) {
-    for (var i = 0; i < m.files.length; i++) {
-      if (m.files[i].path === relativePath) { return m.files[i]; }
-    }
-    return null;
   }
 
   function makeThumb(file) {
@@ -598,10 +639,9 @@ function initMedia(vscode, state, save) {
   function makeTile(file) {
     var tile = document.createElement("button");
     tile.type = "button";
-    tile.className = "tile" + (m.selectedPath === file.path ? " selected" : "");
+    tile.className = "tile";
     tile.setAttribute("role", "listitem");
-    tile.setAttribute("aria-label", file.name + ", " + (TYPE_LABELS[file.type] || "file"));
-    tile.setAttribute("aria-pressed", m.selectedPath === file.path ? "true" : "false");
+    tile.setAttribute("aria-label", "Open details for " + file.name + ", " + (TYPE_LABELS[file.type] || "file"));
     tile.appendChild(makeThumb(file));
 
     var name = document.createElement("div");
@@ -610,10 +650,10 @@ function initMedia(vscode, state, save) {
     name.title = file.name;
     tile.appendChild(name);
 
+    // Selecting a tile only ever requests that the editor-area details
+    // panel open/update for this file -- no sidebar state changes.
     tile.addEventListener("click", function () {
-      m.selectedPath = file.path;
-      save();
-      render();
+      vscode.postMessage({ type: "mediaSelect", path: file.path });
     });
     return tile;
   }
@@ -654,85 +694,15 @@ function initMedia(vscode, state, save) {
     disabledEl.appendChild(message);
   }
 
-  function makeDetailAction(label, ariaLabel, onClick, danger) {
-    var button = document.createElement("button");
-    button.type = "button";
-    button.className = "action" + (danger ? " danger" : "");
-    button.textContent = label;
-    button.setAttribute("aria-label", ariaLabel);
-    button.addEventListener("click", onClick);
-    return button;
-  }
-
-  function renderDetails() {
-    detailsEl.textContent = "";
-    if (!m.selectedPath) { return; }
-    var file = findFile(m.selectedPath);
-    if (!file) {
-      m.selectedPath = null;
-      save();
-      return;
-    }
-
-    if (file.type === "image" && file.previewUri) {
-      var img = document.createElement("img");
-      img.className = "detail-preview";
-      img.src = file.previewUri;
-      img.alt = "";
-      detailsEl.appendChild(img);
-    } else {
-      var placeholder = document.createElement("div");
-      placeholder.className = "placeholder detail-placeholder";
-      placeholder.textContent = TYPE_LABELS[file.type] || "File";
-      detailsEl.appendChild(placeholder);
-    }
-
-    var dl = document.createElement("dl");
-    var fields = [
-      ["Filename", file.name],
-      ["Path", "media/" + file.path],
-      ["Type", TYPE_LABELS[file.type] || "File"],
-      ["Size", file.sizeLabel],
-      ["Modified", new Date(file.mtimeMs).toLocaleString()],
-    ];
-    for (var i = 0; i < fields.length; i++) {
-      var dt = document.createElement("dt");
-      dt.textContent = fields[i][0];
-      var dd = document.createElement("dd");
-      dd.textContent = fields[i][1];
-      dl.appendChild(dt);
-      dl.appendChild(dd);
-    }
-    detailsEl.appendChild(dl);
-
-    var actions = document.createElement("div");
-    actions.className = "detail-actions";
-    actions.appendChild(makeDetailAction("Copy Path", "Copy media path to clipboard", function () {
-      vscode.postMessage({ type: "mediaCopyPath", path: file.path });
-    }));
-    actions.appendChild(makeDetailAction("Open", "Open " + file.name, function () {
-      vscode.postMessage({ type: "mediaOpen", path: file.path });
-    }));
-    actions.appendChild(makeDetailAction("Reveal", "Reveal " + file.name + " in file explorer", function () {
-      vscode.postMessage({ type: "mediaReveal", path: file.path });
-    }));
-    actions.appendChild(makeDetailAction("Delete", "Delete " + file.name, function () {
-      vscode.postMessage({ type: "mediaDelete", path: file.path });
-    }, true));
-    detailsEl.appendChild(actions);
-  }
-
   function render() {
     renderDisabled();
     if (m.disabled) {
       gridEl.textContent = "";
-      detailsEl.textContent = "";
       emptyEl.textContent = "";
       return;
     }
     renderGrid();
     renderEmptyState();
-    renderDetails();
   }
 
   searchInput.value = m.query;
@@ -778,20 +748,13 @@ function initMedia(vscode, state, save) {
         setStatus(message.message, !!message.isError);
       },
       mediaUploaded: function (message) {
-        if (message.paths && message.paths.length > 0) {
-          m.selectedPath = message.paths[message.paths.length - 1];
-          save();
-        }
+        // Never selects the uploaded file(s) -- just confirms the count.
         setStatus(
           message.paths.length === 1 ? "Uploaded 1 file." : "Uploaded " + message.paths.length + " files.",
           false
         );
       },
-      mediaDeleted: function (message) {
-        if (m.selectedPath === message.path) {
-          m.selectedPath = null;
-          save();
-        }
+      mediaDeleted: function () {
         setStatus("File deleted.", false);
       },
     },
