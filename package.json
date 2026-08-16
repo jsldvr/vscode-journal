@@ -230,7 +230,7 @@
     "@typescript-eslint/parser": "^5.45.0",
     "@vscode/test-electron": "^3.0.0",
     "@vscode/vsce": "^3.9.2",
-    "eslint": "^8.28.0",
+    "eslint": "^10.8.1",
     "fast-check": "^3.23.2",
     "husky": "^9.1.7",
     "lint-staged": "^13.2.3",
