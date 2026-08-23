@@ -583,6 +583,71 @@ suite("blogIndex", function () {
     assert.ok(snippet.endsWith("..."));
     assert.ok(snippet.length < body.length);
   });
+
+  test("an entry using only pubDate is indexed at that date", async () => {
+    await writeEntry(
+      entriesDir,
+      "2026/03/15/astro.md",
+      `---\ntitle: Astro\npubDate: 2026-03-15 08:30:00\ntags: [astro]\n---\n\nAstro body.\n`
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    const entries = await index.listEntries();
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].date, "2026-03-15 08:30:00");
+    assert.deepStrictEqual(entries[0].tags, ["astro"]);
+  });
+
+  test("date wins over pubDate when an entry carries both", async () => {
+    await writeEntry(
+      entriesDir,
+      "2026/07/24/both.md",
+      `---\ntitle: Both\ndate: 2026-07-24 10:00:00\npubDate: 2026-03-15 08:30:00\ntags: []\n---\n\nBoth body.\n`
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    const entries = await index.listEntries();
+    assert.strictEqual(entries[0].date, "2026-07-24 10:00:00");
+  });
+
+  test("pubDate and date entries sort together by their frontmatter dates", async () => {
+    await writeEntry(
+      entriesDir,
+      "2026/01/01/oldest.md",
+      `---\ntitle: Oldest\npubDate: 2026-01-01 00:00:00\ntags: []\n---\n\nOldest.\n`
+    );
+    await writeEntry(
+      entriesDir,
+      "2026/05/05/middle.md",
+      entryMarkdown("Middle", "Middle.", [], "2026-05-05 00:00:00")
+    );
+    await writeEntry(
+      entriesDir,
+      "2026/09/09/newest.md",
+      `---\ntitle: Newest\npubDate: 2026-09-09 00:00:00\ntags: []\n---\n\nNewest.\n`
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    const titles = (await index.listEntries()).map((entry) => entry.title);
+    assert.deepStrictEqual(titles, ["Newest", "Middle", "Oldest"]);
+  });
+
+  test("an entry with neither date nor pubDate still indexes with a fallback date", async () => {
+    await writeEntry(
+      entriesDir,
+      "2026/07/24/undated.md",
+      `---\ntitle: Undated\ntags: []\n---\n\nUndated body.\n`
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    const entries = await index.listEntries();
+    assert.strictEqual(entries.length, 1);
+    assert.ok(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(entries[0].date));
+  });
 });
 
 // Replicates the v1 schema (before the FTS migration) so the upgrade
