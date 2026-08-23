@@ -750,7 +750,10 @@ function toIndexedEntry(
   return {
     path: relativePath,
     title: parsed.title || path.basename(relativePath, ".md"),
-    date: parsed.date || moment().format("YYYY-MM-DD HH:mm:ss"),
+    // `date` stays authoritative when an entry carries both keys; the
+    // Astro-style `pubDate` only fills in for entries that omit `date`.
+    date:
+      parsed.date || parsed.pubDate || moment().format("YYYY-MM-DD HH:mm:ss"),
     body: parsed.body,
     tags: parsed.tags,
     mtimeMs: Math.floor(mtimeMs),

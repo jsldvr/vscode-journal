@@ -1,14 +1,17 @@
 export interface ParsedEntry {
   title?: string;
   date?: string;
+  pubDate?: string;
   tags: string[];
   body: string;
 }
 
 // Regex-based frontmatter parser shared by the watcher, activation
 // reconciliation, and full-rescan paths. Not a full YAML parser: it
-// understands `title:`, `date:`, and `tags:` (inline array or single
-// value), which is the format the extension itself writes.
+// understands `title:`, `date:`, `pubDate:`, and `tags:` (inline array
+// or single value), which covers the format the extension itself writes
+// plus the Astro-style `pubDate:` key. Both date keys are reported as
+// parsed; callers decide which one wins.
 //
 // The returned body excludes the frontmatter block so frontmatter keys
 // and values are never indexed as searchable entry content.
@@ -35,6 +38,11 @@ export function parseEntryContent(content: string): ParsedEntry {
   const dateMatch = frontmatterContent.match(/^date:\s*(.+)$/m);
   if (dateMatch) {
     result.date = stripQuotes(dateMatch[1]);
+  }
+
+  const pubDateMatch = frontmatterContent.match(/^pubDate:\s*(.+)$/m);
+  if (pubDateMatch) {
+    result.pubDate = stripQuotes(pubDateMatch[1]);
   }
 
   const tagsMatch = frontmatterContent.match(/^tags:\s*(\[.*?\]|\S+)$/m);

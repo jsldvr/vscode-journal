@@ -12,6 +12,17 @@ tags: [alpha, beta]
 Body content here.
 `;
 
+const PUB_DATE_SAMPLE = `---
+title: Astro Post
+pubDate: 2026-03-15 08:30:00
+tags: [astro]
+---
+
+# Astro Post
+
+Astro body content.
+`;
+
 suite("frontmatter", () => {
   test("parses title, date, and inline tag arrays", () => {
     const parsed = parseEntryContent(SAMPLE);
@@ -58,5 +69,56 @@ Body.
     assert.strictEqual(parsed.title, "Quoted Title");
     assert.strictEqual(parsed.date, "2026-01-01 00:00:00");
     assert.deepStrictEqual(parsed.tags, ["solo"]);
+  });
+
+  test("Astro-style pubDate is parsed when date is absent", () => {
+    const parsed = parseEntryContent(PUB_DATE_SAMPLE);
+    assert.strictEqual(parsed.title, "Astro Post");
+    assert.strictEqual(parsed.pubDate, "2026-03-15 08:30:00");
+    assert.strictEqual(parsed.date, undefined);
+    assert.deepStrictEqual(parsed.tags, ["astro"]);
+  });
+
+  test("date and pubDate are reported independently when both are present", () => {
+    const content = `---
+title: Both Keys
+date: 2026-07-24 10:00:00
+pubDate: 2026-03-15 08:30:00
+tags: []
+---
+
+Body.
+`;
+    const parsed = parseEntryContent(content);
+    assert.strictEqual(parsed.date, "2026-07-24 10:00:00");
+    assert.strictEqual(parsed.pubDate, "2026-03-15 08:30:00");
+  });
+
+  test("pubDate does not satisfy the date key and date does not satisfy pubDate", () => {
+    const onlyDate = parseEntryContent(SAMPLE);
+    assert.strictEqual(onlyDate.date, "2026-07-24 10:00:00");
+    assert.strictEqual(onlyDate.pubDate, undefined);
+
+    const onlyPubDate = parseEntryContent(PUB_DATE_SAMPLE);
+    assert.strictEqual(onlyPubDate.date, undefined);
+  });
+
+  test("quoted pubDate values are unquoted and CRLF does not leak", () => {
+    const content = `---
+title: Quoted Pub Date
+pubDate: '2026-03-15 08:30:00'
+tags: []
+---
+
+Body.
+`.replace(/\n/g, "\r\n");
+    const parsed = parseEntryContent(content);
+    assert.strictEqual(parsed.pubDate, "2026-03-15 08:30:00");
+  });
+
+  test("pubDate is excluded from the indexed body", () => {
+    const parsed = parseEntryContent(PUB_DATE_SAMPLE);
+    assert.ok(!parsed.body.includes("pubDate:"));
+    assert.ok(parsed.body.includes("Astro body content."));
   });
 });
