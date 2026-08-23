@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-23
+
+### Added
+
+- Support for Astro-style `pubDate` frontmatter. Entries that use `pubDate`
+  instead of `date` are now indexed, sorted, grouped, and displayed by that
+  date. When both keys are present, `date` remains authoritative.
+
 ## [1.2.0] - 2026-08-16
 
 ### Changed
