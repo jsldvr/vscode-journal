@@ -16,7 +16,9 @@ A simple blog extension for VS Code that stores entries in markdown format with 
 - **Media Library**: A Media section built into the same Journal sidebar view,
   below the entry browse list, for browsing, uploading, and managing images,
   audio, video, and other files stored in the media directory (`media/` by
-  default, configurable via `vsJournal.mediaPath`)
+  default, configurable via `vsJournal.mediaPath`). One click on a tile inserts
+  correctly formatted Markdown for the file at the cursor in the active journal
+  entry.
 
 ## Directory Structure
 
@@ -105,15 +107,29 @@ setting unchanged.
 - Files render as a responsive thumbnail grid: images show real previews,
   everything else shows a labeled placeholder. Search matches filenames and
   paths case-insensitively; results sort newest-modified first.
-- Clicking (or keyboard-activating) a tile opens its details in an editor-area
-  tab -- preview, filename, `media/<relative-path>`, type, size, and
-  last-modified time, plus Copy Path, Open, Reveal in File Explorer/Finder,
-  and Delete actions -- titled with the filename. Selecting another tile
-  reuses and updates that same tab rather than opening a new one. Delete
-  always asks for confirmation first, only removes the one selected file,
-  and replaces the tab's content with an unavailable state afterward.
-  Nothing is ever selected automatically: opening or refreshing the sidebar,
-  or uploading files, never opens or changes this tab on its own.
+- Each tile has two actions. The primary action -- clicking the thumbnail, or
+  activating it with Enter or Space -- inserts the file as Markdown at every
+  cursor in the active journal entry, without opening or focusing any other
+  tab. An image inserts `![alt text](media/image.png)`; any other file inserts
+  `[file.pdf](media/file.pdf)` using the file's own name as the link label. The
+  `alt text` is a snippet placeholder, already selected so you can type the real
+  text immediately. The link target uses your configured `vsJournal.mediaPath`
+  (so `assets/uploads` produces `assets/uploads/...`), always with forward
+  slashes. Insertion only happens when the active editor is a saved Markdown
+  file inside the blog `entries/` directory; the media root and the selected
+  file are re-checked at that moment. If there is no eligible editor, or the
+  media file or root is missing or unsafe, the Media status line reports it and
+  nothing is inserted, created, or opened.
+- The secondary action is a small **Details** button on each tile. It opens the
+  file's details in an editor-area tab -- preview, filename,
+  `media/<relative-path>`, type, size, and last-modified time, plus Copy Path,
+  Open, Reveal in File Explorer/Finder, and Delete actions -- titled with the
+  filename. Choosing Details for another tile reuses and updates that same tab
+  rather than opening a new one. Delete always asks for confirmation first, only
+  removes the one selected file, and replaces the tab's content with an
+  unavailable state afterward. Nothing opens this tab automatically: opening or
+  refreshing the sidebar, uploading files, or inserting media never opens or
+  changes it.
 - Upload opens a multi-select file picker and copies the chosen files into
   `media/`, preserving filenames. A name collision never overwrites an
   existing file -- colliding uploads are renamed with a numeric suffix

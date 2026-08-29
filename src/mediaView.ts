@@ -2,13 +2,15 @@ import * as vscode from "vscode";
 import * as fs from "fs-extra";
 import * as path from "path";
 import {
+  classifyMediaType,
   formatBytes,
   importMediaFile,
   isMediaRootDirectory,
   resolveContainedMediaFilePath,
   scanMediaDirectory,
 } from "./mediaLibrary";
-import { normalizeEntryPath } from "./pathUtils";
+import { isPathInside, normalizeEntryPath } from "./pathUtils";
+import { buildMediaSnippetBody, composeMediaTarget } from "./mediaMarkdown";
 import {
   InboundMediaMessage,
   MediaCopyPathMessage,
@@ -38,6 +40,19 @@ export interface MediaControllerDeps {
   // directory it returns a portable workspace-relative label such as
   // "blog/assets", even when that directory does not exist on disk yet.
   describeMediaLocation(mediaDir: string | undefined): string;
+  // Portable, forward-slash media-directory path relative to the
+  // configured blog directory (e.g. "media" or "assets/uploads"),
+  // formatted from the exact mediaDir snapshot the caller already
+  // resolved via getMediaDir() -- never a second configuration read --
+  // so an inserted link target cannot drift from the scan/resource-root
+  // generation. Returns undefined when there is no blog directory or
+  // mediaDir is not contained within it, in which case insertion is
+  // refused rather than guessed.
+  toPortableMediaDir(mediaDir: string): string | undefined;
+  // The configured journal entries directory (absolute), or undefined
+  // when no blog directory resolves. Media insertion is limited to an
+  // active Markdown editor whose file lives inside this directory.
+  getEntriesDir(): string | undefined;
   // Called after upload has ensured mediaDir exists, so the caller can
   // rebind a watcher that may have been created before the directory
   // existed.
@@ -68,15 +83,18 @@ type MediaFileActionMessage =
 
 // Owns the media half of the combined Journal webview -- the sidebar
 // grid, filesystem state, and the outbound "media*" messages -- plus
-// the lifecycle of the single editor-area details panel a tile
-// selection opens. Not a vscode.WebviewViewProvider itself -- there is
-// exactly one contributed view (vsJournal.search), and SearchViewProvider
-// composes this controller into its own single webview/message-
-// channel/outbox rather than standing up a second view. Every action
-// that touches the filesystem (open/reveal/copyPath/delete) re-resolves
-// its path through resolveContainedMediaFilePath immediately before
-// acting; nothing sent by either webview is trusted as an
-// already-safe filesystem path.
+// the lifecycle of the single editor-area details panel the secondary
+// Details tile action opens. Not a vscode.WebviewViewProvider itself --
+// there is exactly one contributed view (vsJournal.search), and
+// SearchViewProvider composes this controller into its own single
+// webview/message-channel/outbox rather than standing up a second view.
+// A tile's primary action inserts the file as Markdown at the active
+// journal-entry cursor(s) (mediaInsert); Details (mediaSelect) is the
+// secondary affordance. Every action that touches the filesystem
+// (insert/open/reveal/copyPath/delete) re-resolves its path through
+// resolveContainedMediaFilePath immediately before acting; nothing sent
+// by either webview is trusted as an already-safe filesystem path, and
+// nothing here creates a missing file or directory.
 export class MediaController {
   private view: vscode.WebviewView | undefined;
   private detailsPanel: MediaDetailsPanel | undefined;
@@ -233,10 +251,14 @@ export class MediaController {
     }
   }
 
-  // Messages from the sidebar grid: refresh/upload/select. Selecting
-  // never happens implicitly (on load, refresh, or upload) -- only in
-  // response to this explicit "mediaSelect" message, which the sidebar
-  // script sends solely from a tile's click/keyboard-activation handler.
+  // Messages from the sidebar grid: refresh/upload/insert/select. A
+  // tile's primary action sends "mediaInsert" (write Markdown at the
+  // active entry cursor); the secondary Details action sends
+  // "mediaSelect" (open the editor-area details panel). Neither the
+  // details panel nor a selection is ever opened implicitly (on load,
+  // refresh, or upload) -- only in response to these explicit messages,
+  // which the sidebar script sends solely from a tile's
+  // click/keyboard-activation handlers.
   async dispatch(message: InboundMediaMessage): Promise<void> {
     switch (message.type) {
       case "mediaRefresh":
@@ -250,10 +272,86 @@ export class MediaController {
       case "mediaUpload":
         await this.upload();
         return;
+      case "mediaInsert":
+        await this.insertMedia(message.path);
+        return;
       case "mediaSelect":
         await this.openDetailsFor(message.path);
         return;
     }
+  }
+
+  // Primary tile action: insert the selected media file as correctly
+  // formatted Markdown at every cursor in the active journal entry. All
+  // state is revalidated here at invocation -- the media root and the
+  // untrusted relative path through the existing
+  // getMediaDir()/resolveContainedMediaFilePath safety path, the link
+  // target from that exact mediaDir snapshot, and the active editor's
+  // eligibility immediately before the edit. Any failure reports a
+  // concise status error and changes no document, creates no file or
+  // directory, and never opens, reveals, or focuses the details panel.
+  private async insertMedia(relativePath: string): Promise<void> {
+    const reply: ReplyFn = (message) => this.post(message);
+
+    const mediaDir = await this.deps.getMediaDir();
+    if (!mediaDir) {
+      reply(insertionError("No safe media directory is available."));
+      return;
+    }
+    const resolved = await resolveContainedMediaFilePath(mediaDir, relativePath);
+    if (!resolved) {
+      reply(insertionError("That media file is no longer available."));
+      return;
+    }
+    const portableMediaDir = this.deps.toPortableMediaDir(mediaDir);
+    if (!portableMediaDir) {
+      reply(
+        insertionError(
+          "Could not resolve the media path relative to the blog directory."
+        )
+      );
+      return;
+    }
+    const target = composeMediaTarget(
+      portableMediaDir,
+      normalizeEntryPath(path.relative(mediaDir, resolved))
+    );
+
+    // Immediately before editing: the active editor must be a
+    // file-backed Markdown document inside the configured entries
+    // directory. Checked last, with no await before insertSnippet, so
+    // the editor cannot change out from under the edit.
+    const editor = eligibleJournalMarkdownEditor(this.deps.getEntriesDir());
+    if (!editor) {
+      reply(
+        insertionError(
+          "Open a journal entry Markdown file to insert media into it."
+        )
+      );
+      return;
+    }
+
+    const snippet = new vscode.SnippetString(
+      buildMediaSnippetBody({
+        // Image behavior comes from trusted media classification of the
+        // revalidated file, never a type supplied by the webview.
+        isImage: classifyMediaType(resolved) === "image",
+        label: path.basename(resolved),
+        target,
+      })
+    );
+
+    let inserted = false;
+    try {
+      inserted = await editor.insertSnippet(snippet);
+    } catch (error) {
+      console.error("VS Journal: failed to insert media snippet:", error);
+    }
+    if (!inserted) {
+      reply(insertionError("Could not insert the media link into the active entry."));
+      return;
+    }
+    reply({ type: "mediaStatus", message: `Inserted ${target}`, isError: false });
   }
 
   // Messages from the details panel: open/reveal/copyPath/delete. Kept
@@ -457,6 +555,38 @@ export class MediaController {
   }
 }
 
+// Status reply for a rejected media insertion: concise text, flagged as
+// an error, routed through the existing media status channel so it does
+// not steal focus or open another editor tab.
+function insertionError(message: string): Record<string, unknown> {
+  return { type: "mediaStatus", message, isError: true };
+}
+
+// The active editor, only when it is a file-backed Markdown document
+// whose path is contained in the current configured journal entries
+// directory -- otherwise undefined so insertion is refused. Reuses
+// isPathInside (never a reimplemented containment check) against the
+// caller-supplied entriesDir snapshot.
+function eligibleJournalMarkdownEditor(
+  entriesDir: string | undefined
+): vscode.TextEditor | undefined {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    return undefined;
+  }
+  const document = editor.document;
+  if (document.uri.scheme !== "file" || document.isUntitled) {
+    return undefined;
+  }
+  if (document.languageId !== "markdown") {
+    return undefined;
+  }
+  if (!entriesDir || !isPathInside(document.uri.fsPath, entriesDir)) {
+    return undefined;
+  }
+  return editor;
+}
+
 // HTML fragment for the media section, appended below the entries
 // browse list inside the single combined webview body. Wrapped in its
 // own scrolling container (max-height + overflow-y) so its own
@@ -488,9 +618,9 @@ export const MEDIA_BODY_HTML = `
 // CSS for the media section, appended to the shared <style> block in
 // searchView.ts. Reuses the entries webview's .cta class for the
 // "Upload Media" empty-state action (same link-style treatment). There
-// is no details/preview markup here -- selecting a tile opens an
-// editor-area panel (see mediaDetailsPanel.ts) instead of rendering
-// anything below the grid.
+// is no details/preview markup here -- the secondary Details tile
+// action opens an editor-area panel (see mediaDetailsPanel.ts) instead
+// of rendering anything below the grid.
 export const MEDIA_STYLES = `
   .section-heading {
     padding: 6px 10px 2px 10px;
@@ -551,7 +681,7 @@ export const MEDIA_STYLES = `
   }
   .icon-button:hover { background: var(--vscode-toolbar-hoverBackground); }
   #media-search:focus-visible, #media-type-filter:focus-visible, .icon-button:focus-visible,
-  .tile:focus-visible {
+  .tile-insert:focus-visible, .tile-details:focus-visible {
     outline: 1px solid var(--vscode-focusBorder);
     outline-offset: 1px;
   }
@@ -573,20 +703,47 @@ export const MEDIA_STYLES = `
     padding: 8px;
   }
   #media-grid:empty { display: none; }
+  /* Non-interactive wrapper: a list item holding a primary Insert
+     button and a secondary Details button. Not itself a button, so the
+     two real buttons are never nested inside another interactive
+     element. */
   .tile {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 4px;
+  }
+  .tile-insert {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 2px;
+    width: 100%;
     padding: 4px;
     color: inherit;
     font: inherit;
+    text-align: center;
     background: transparent;
     border: 1px solid transparent;
     border-radius: 4px;
     cursor: pointer;
   }
-  .tile:hover { background: var(--vscode-list-hoverBackground); }
+  .tile-insert:hover { background: var(--vscode-list-hoverBackground); }
+  .tile-details {
+    align-self: center;
+    padding: 0 4px;
+    color: var(--vscode-textLink-foreground);
+    font-size: 0.8em;
+    background: none;
+    border: none;
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  .tile-details:hover {
+    color: var(--vscode-textLink-activeForeground);
+    text-decoration: underline;
+  }
   .thumb {
     width: 100%;
     aspect-ratio: 1 / 1;
@@ -625,9 +782,11 @@ export const MEDIA_STYLES = `
 // paths) is assigned through textContent, never innerHTML. Search
 // query and active type filter persist via the shared state so they
 // survive the webview being hidden and shown again; selection is
-// intentionally NOT part of persisted state -- clicking/activating a
-// tile is a one-off "open details" request (mediaSelect), not
-// something the sidebar tracks, highlights, or restores.
+// intentionally NOT part of persisted state -- a tile's primary Insert
+// action is a one-off "insert Markdown at the cursor" request
+// (mediaInsert) and its secondary Details action a one-off "open
+// details" request (mediaSelect), neither of which the sidebar tracks,
+// highlights, or restores.
 export const MEDIA_SCRIPT = `
 function initMedia(vscode, state, save) {
   var headingEl = document.getElementById("media-heading");
@@ -701,24 +860,50 @@ function initMedia(vscode, state, save) {
   }
 
   function makeTile(file) {
-    var tile = document.createElement("button");
-    tile.type = "button";
+    var typeLabel = TYPE_LABELS[file.type] || "file";
+
+    // Non-interactive wrapper: never a button itself, so the primary
+    // and secondary buttons below are not nested inside another
+    // interactive element.
+    var tile = document.createElement("div");
     tile.className = "tile";
     tile.setAttribute("role", "listitem");
-    tile.setAttribute("aria-label", "Open details for " + file.name + ", " + (TYPE_LABELS[file.type] || "file"));
-    tile.appendChild(makeThumb(file));
+
+    // Primary action: a real <button>, so native Enter and Space
+    // activation both fire click and insert the file the same way a
+    // mouse click does.
+    var insert = document.createElement("button");
+    insert.type = "button";
+    insert.className = "tile-insert";
+    insert.setAttribute(
+      "aria-label",
+      "Insert " + file.name + " into the active journal entry, " + typeLabel
+    );
+    insert.appendChild(makeThumb(file));
 
     var name = document.createElement("div");
     name.className = "tile-name";
     name.textContent = file.name;
     name.title = file.name;
-    tile.appendChild(name);
+    insert.appendChild(name);
 
-    // Selecting a tile only ever requests that the editor-area details
-    // panel open/update for this file -- no sidebar state changes.
-    tile.addEventListener("click", function () {
+    insert.addEventListener("click", function () {
+      vscode.postMessage({ type: "mediaInsert", path: file.path });
+    });
+    tile.appendChild(insert);
+
+    // Secondary, discoverable affordance: opens the editor-area details
+    // panel for this file. Not required for insertion.
+    var details = document.createElement("button");
+    details.type = "button";
+    details.className = "tile-details";
+    details.textContent = "Details";
+    details.setAttribute("aria-label", "Show details for " + file.name);
+    details.addEventListener("click", function () {
       vscode.postMessage({ type: "mediaSelect", path: file.path });
     });
+    tile.appendChild(details);
+
     return tile;
   }
 

@@ -92,6 +92,20 @@ async function resolveMediaDir(): Promise<string | undefined> {
   return mediaDir;
 }
 
+// Portable, forward-slash media-directory path relative to the
+// configured blog directory (e.g. "media" or "assets/uploads"),
+// formatted from the exact mediaDir snapshot the caller already
+// resolved via resolveMediaDir() -- never a second configuration read
+// -- so an inserted media link target cannot drift from the scan or
+// resource-root generation. undefined when there is no blog directory
+// or mediaDir is not contained within it, in which case media
+// insertion is refused rather than guessed. Presentation/derivation
+// only: no filesystem access.
+function portableMediaDirPath(mediaDir: string): string | undefined {
+  const blogDir = resolveBlogDir();
+  return blogDir ? toPortableBlogRelativePath(blogDir, mediaDir) : undefined;
+}
+
 // Presentation label for the Media heading, formatted from the exact
 // mediaDir snapshot pushState() already resolved -- never a second
 // configuration read -- so the label cannot drift from the file scan.
@@ -243,6 +257,8 @@ export function activate(context: vscode.ExtensionContext) {
     {
       getMediaDir: () => resolveMediaDir(),
       describeMediaLocation: (mediaDir) => describeMediaLocation(mediaDir),
+      toPortableMediaDir: (mediaDir) => portableMediaDirPath(mediaDir),
+      getEntriesDir: () => host.entriesDir(),
       onMediaDirEnsured: () => void rebindMediaWatcher(),
     }
   );

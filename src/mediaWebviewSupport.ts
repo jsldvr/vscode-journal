@@ -30,6 +30,15 @@ export interface MediaSelectMessage {
   path: string;
 }
 
+// Sent by the sidebar grid when a tile's primary Insert action is
+// clicked or keyboard-activated. Requests that the selected media file
+// be inserted as correctly formatted Markdown at every cursor in the
+// active journal entry -- it never opens or focuses the details panel.
+export interface MediaInsertMessage {
+  type: "mediaInsert";
+  path: string;
+}
+
 export interface MediaOpenMessage {
   type: "mediaOpen";
   path: string;
@@ -54,6 +63,7 @@ export type InboundMediaMessage =
   | MediaRefreshMessage
   | MediaUploadMessage
   | MediaSelectMessage
+  | MediaInsertMessage
   | MediaOpenMessage
   | MediaRevealMessage
   | MediaCopyPathMessage
@@ -64,7 +74,13 @@ type MediaMessageValidator = (
 ) => InboundMediaMessage | undefined;
 
 function pathMessageValidator(
-  type: "mediaSelect" | "mediaOpen" | "mediaReveal" | "mediaCopyPath" | "mediaDelete"
+  type:
+    | "mediaSelect"
+    | "mediaInsert"
+    | "mediaOpen"
+    | "mediaReveal"
+    | "mediaCopyPath"
+    | "mediaDelete"
 ): MediaMessageValidator {
   return (message) => {
     const mediaPath = boundedPathString(message.path);
@@ -76,6 +92,7 @@ const MEDIA_MESSAGE_VALIDATORS: Record<string, MediaMessageValidator> = {
   mediaRefresh: () => ({ type: "mediaRefresh" }),
   mediaUpload: () => ({ type: "mediaUpload" }),
   mediaSelect: pathMessageValidator("mediaSelect"),
+  mediaInsert: pathMessageValidator("mediaInsert"),
   mediaOpen: pathMessageValidator("mediaOpen"),
   mediaReveal: pathMessageValidator("mediaReveal"),
   mediaCopyPath: pathMessageValidator("mediaCopyPath"),
