@@ -3,10 +3,13 @@ import * as fs from "fs-extra";
 import * as os from "os";
 import * as path from "path";
 import {
+  DEFAULT_MEDIA_PATH,
   createUniqueCopy,
   createUniqueFile,
   isPathInside,
   normalizeEntryPath,
+  resolveContainedMediaDir,
+  toPortableBlogRelativePath,
 } from "../../src/pathUtils";
 
 async function makeTempDir(): Promise<string> {
@@ -112,6 +115,57 @@ suite("pathUtils", () => {
       (firstContent === "a-bytes" && secondContent === "b-bytes") ||
         (firstContent === "b-bytes" && secondContent === "a-bytes"),
       "each allocated copy must retain the content its own call copied"
+    );
+  });
+
+  test("resolveContainedMediaDir falls back to the default media subdirectory for blank config", () => {
+    const blogDir = path.join(tempDir, "blog");
+    const expected = path.join(blogDir, DEFAULT_MEDIA_PATH);
+    assert.strictEqual(resolveContainedMediaDir(blogDir, undefined), expected);
+    assert.strictEqual(resolveContainedMediaDir(blogDir, ""), expected);
+    assert.strictEqual(resolveContainedMediaDir(blogDir, "   "), expected);
+  });
+
+  test("resolveContainedMediaDir resolves a nested blog-relative path", () => {
+    const blogDir = path.join(tempDir, "blog");
+    assert.strictEqual(
+      resolveContainedMediaDir(blogDir, "assets/pics"),
+      path.join(blogDir, "assets", "pics")
+    );
+  });
+
+  test("resolveContainedMediaDir rejects traversal, absolute paths, and the blog directory itself", () => {
+    const blogDir = path.join(tempDir, "blog");
+    assert.strictEqual(resolveContainedMediaDir(blogDir, "../outside"), undefined);
+    assert.strictEqual(
+      resolveContainedMediaDir(blogDir, "media/../../outside"),
+      undefined
+    );
+    assert.strictEqual(
+      resolveContainedMediaDir(blogDir, path.join(tempDir, "abs")),
+      undefined
+    );
+    assert.strictEqual(resolveContainedMediaDir(blogDir, "."), undefined);
+  });
+
+  test("toPortableBlogRelativePath converts a contained selection to a forward-slash relative path", () => {
+    const blogDir = path.join(tempDir, "blog");
+    assert.strictEqual(
+      toPortableBlogRelativePath(blogDir, path.join(blogDir, "assets", "pics")),
+      "assets/pics"
+    );
+  });
+
+  test("toPortableBlogRelativePath rejects the blog directory itself and directories outside it", () => {
+    const blogDir = path.join(tempDir, "blog");
+    assert.strictEqual(toPortableBlogRelativePath(blogDir, blogDir), undefined);
+    assert.strictEqual(
+      toPortableBlogRelativePath(blogDir, path.join(tempDir, "elsewhere")),
+      undefined
+    );
+    assert.strictEqual(
+      toPortableBlogRelativePath(blogDir, path.join(blogDir, "..", "sibling")),
+      undefined
     );
   });
 

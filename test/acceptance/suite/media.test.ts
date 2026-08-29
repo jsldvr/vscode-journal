@@ -285,6 +285,143 @@ suite("Media Library", function () {
     }
   }
 
+  async function withStubbedOpenDialog<T>(
+    result: vscode.Uri[] | undefined,
+    run: () => Promise<T>
+  ): Promise<T> {
+    const original = vscode.window.showOpenDialog;
+    (vscode.window as unknown as { showOpenDialog: unknown }).showOpenDialog =
+      async () => result;
+    try {
+      return await run();
+    } finally {
+      (vscode.window as unknown as { showOpenDialog: unknown }).showOpenDialog =
+        original;
+    }
+  }
+
+  async function withCapturedErrorMessages<T>(
+    run: (messages: string[]) => Promise<T>
+  ): Promise<T> {
+    const original = vscode.window.showErrorMessage;
+    const messages: string[] = [];
+    (vscode.window as unknown as { showErrorMessage: unknown }).showErrorMessage =
+      async (message: string) => {
+        messages.push(message);
+        return undefined;
+      };
+    try {
+      return await run(messages);
+    } finally {
+      (vscode.window as unknown as { showErrorMessage: unknown }).showErrorMessage =
+        original;
+    }
+  }
+
+  async function resetMediaPath(): Promise<void> {
+    await vscode.workspace
+      .getConfiguration("vsJournal")
+      .update("mediaPath", undefined, vscode.ConfigurationTarget.Workspace);
+  }
+
+  test("vsJournal.setMediaPath is registered and vsJournal.mediaPath defaults to media", async () => {
+    await activateExtension();
+    const commands = await vscode.commands.getCommands(true);
+    assert.ok(commands.includes("vsJournal.setMediaPath"));
+    assert.strictEqual(
+      vscode.workspace.getConfiguration("vsJournal").get<string>("mediaPath"),
+      "media"
+    );
+  });
+
+  test("setMediaPath stores a portable, blog-relative path for a folder selected inside the blog", async () => {
+    await activateExtension();
+    const selectedDir = path.join(workspaceRoot(), "blog", "assets", "pics");
+    await fs.ensureDir(selectedDir);
+    try {
+      await withStubbedOpenDialog([vscode.Uri.file(selectedDir)], () =>
+        Promise.resolve(
+          vscode.commands.executeCommand("vsJournal.setMediaPath")
+        )
+      );
+      assert.strictEqual(
+        vscode.workspace
+          .getConfiguration("vsJournal")
+          .get<string>("mediaPath"),
+        "assets/pics"
+      );
+    } finally {
+      await resetMediaPath();
+      await fs.remove(path.join(workspaceRoot(), "blog", "assets"));
+    }
+  });
+
+  test("setMediaPath rejects a folder outside the blog directory and leaves configuration unchanged", async () => {
+    await activateExtension();
+    const before = vscode.workspace
+      .getConfiguration("vsJournal")
+      .get<string>("mediaPath");
+    const outsideDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "vs-journal-outside-")
+    );
+    try {
+      const errors = await withCapturedErrorMessages((messages) =>
+        withStubbedOpenDialog([vscode.Uri.file(outsideDir)], async () => {
+          await vscode.commands.executeCommand("vsJournal.setMediaPath");
+          return messages;
+        })
+      );
+      assert.ok(
+        errors.some((message) => message.includes("must be inside")),
+        "an outside selection must report an error"
+      );
+      assert.strictEqual(
+        vscode.workspace
+          .getConfiguration("vsJournal")
+          .get<string>("mediaPath"),
+        before,
+        "configuration must be unchanged after a rejected selection"
+      );
+    } finally {
+      await fs.remove(outsideDir);
+    }
+  });
+
+  test("setMediaPath leaves configuration unchanged when the picker is cancelled", async () => {
+    await activateExtension();
+    const before = vscode.workspace
+      .getConfiguration("vsJournal")
+      .get<string>("mediaPath");
+    await withStubbedOpenDialog(undefined, () =>
+      Promise.resolve(vscode.commands.executeCommand("vsJournal.setMediaPath"))
+    );
+    assert.strictEqual(
+      vscode.workspace.getConfiguration("vsJournal").get<string>("mediaPath"),
+      before
+    );
+  });
+
+  test("the media library stays functional after vsJournal.mediaPath changes, without creating the new directory", async () => {
+    await activateExtension();
+    try {
+      await vscode.workspace
+        .getConfiguration("vsJournal")
+        .update(
+          "mediaPath",
+          "media-alt",
+          vscode.ConfigurationTarget.Workspace
+        );
+      await vscode.commands.executeCommand("vsJournal.refreshMediaLibrary");
+      assert.strictEqual(
+        await fs.pathExists(path.join(workspaceRoot(), "blog", "media-alt")),
+        false,
+        "changing mediaPath must not scaffold the new media directory"
+      );
+    } finally {
+      await resetMediaPath();
+    }
+  });
+
   test("delete aborts instead of removing a same-named file from a different blog root if the media root changes while the confirmation modal is open (cross-root-delete regression)", async () => {
     const rootA = await fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-media-a-"));
     const rootB = await fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-media-b-"));

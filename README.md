@@ -15,7 +15,8 @@ A simple blog extension for VS Code that stores entries in markdown format with 
   tools apply
 - **Media Library**: A Media section built into the same Journal sidebar view,
   below the entry browse list, for browsing, uploading, and managing images,
-  audio, video, and other files stored in `media/`
+  audio, video, and other files stored in the media directory (`media/` by
+  default, configurable via `vsJournal.mediaPath`)
 
 ## Directory Structure
 
@@ -29,6 +30,7 @@ blog/
 │           └── DD/      # Day folders
 │               └── title.md  # Individual entries
 └── media/                # Images, audio, video, and other files
+                          # (default location; see vsJournal.mediaPath)
 ```
 
 Markdown is the source of truth. Everything under `entries/.vs-journal/` is
@@ -73,9 +75,22 @@ section header between them.
 
 The Journal sidebar view has a Media section below the entry browse list, in
 the same panel and the same webview -- there is still only one contributed
-view in the activity bar. It shows the contents of `<blogPath>/media` (a
-sibling of `entries/`, created automatically the first time you upload a
-file -- it is never created merely by opening the extension).
+view in the activity bar. It shows the contents of the media directory,
+which is `vsJournal.mediaPath` resolved against the configured blog
+directory (default `media`, i.e. a sibling of `entries/`). The directory is
+created automatically the first time you upload a file -- it is never
+created merely by opening the extension, by opening the folder picker, or
+by changing the setting.
+
+The media directory must stay within the configured blog directory. A
+`vsJournal.mediaPath` value that is absolute or escapes the blog directory
+(for example `../shared`) is refused: the Media section reports an
+unavailable state rather than reading, watching, or writing outside the
+blog. Run `Journal: Set Media Directory` to pick a folder inside the blog
+directory; the selection is stored as a portable, forward-slash
+blog-relative path at Workspace scope (matching `vsJournal.blogPath`), and a
+folder outside the blog directory is rejected with an error that leaves the
+setting unchanged.
 
 - A toolbar (search field, a type filter -- All / Images / Audio / Video /
   Documents/Other -- an Upload button, and a Refresh button) stays pinned to
@@ -100,7 +115,8 @@ file -- it is never created merely by opening the extension).
   when files are added, changed, deleted, or renamed on disk.
 - `Journal: Upload Media` and `Journal: Refresh Media Library` are available
   from the Command Palette; the same actions are also available as buttons
-  in the Media toolbar itself.
+  in the Media toolbar itself. `Journal: Set Media Directory` opens a folder
+  picker to change `vsJournal.mediaPath`.
 
 ## Git and the generated index
 
@@ -122,7 +138,12 @@ rule does not untrack them; untrack them manually (for example
 
 ## Configuration
 
-- `vsJournal.blogPath`: Path to blog directory (default: "./blog")
+- `vsJournal.blogPath`: Path to blog directory, relative to the workspace
+  root (default: "./blog")
+- `vsJournal.mediaPath`: Path to the media directory, relative to the
+  configured blog directory (default: "media"). Must stay within the blog
+  directory; absolute or escaping values are ignored. Change it with
+  `Journal: Set Media Directory`.
 
 ## Development
 

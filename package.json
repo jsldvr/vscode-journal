@@ -30,6 +30,7 @@
     "onCommand:vsJournal.openEntry",
     "onCommand:vsJournal.searchByTag",
     "onCommand:vsJournal.setBlogPath",
+    "onCommand:vsJournal.setMediaPath",
     "onCommand:vsJournal.rescanEntries",
     "onCommand:vsJournal.uploadMedia",
     "onCommand:vsJournal.refreshMediaLibrary",
@@ -81,6 +82,12 @@
       {
         "command": "vsJournal.setBlogPath",
         "title": "Set Blog Directory",
+        "category": "Journal",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "vsJournal.setMediaPath",
+        "title": "Set Media Directory",
         "category": "Journal",
         "icon": "$(folder)"
       },
@@ -151,6 +158,9 @@
           "command": "vsJournal.setBlogPath"
         },
         {
+          "command": "vsJournal.setMediaPath"
+        },
+        {
           "command": "vsJournal.openEntry",
           "when": "false"
         },
@@ -173,6 +183,13 @@
           "type": "string",
           "default": "./blog",
           "description": "Path to the blog directory relative to workspace root",
+          "pattern": "^[^<>:\"|?*]+$",
+          "patternErrorMessage": "Invalid path characters. Please use a valid directory path."
+        },
+        "vsJournal.mediaPath": {
+          "type": "string",
+          "default": "media",
+          "description": "Path to the media directory, relative to the configured blog directory. Must stay within the blog directory.",
           "pattern": "^[^<>:\"|?*]+$",
           "patternErrorMessage": "Invalid path characters. Please use a valid directory path."
         }

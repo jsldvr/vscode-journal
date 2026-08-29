@@ -4,8 +4,56 @@ import { constants as fsConstants } from "fs";
 
 const MAX_FILENAME_ATTEMPTS = 1000;
 
+// Runtime fallback for vsJournal.mediaPath, mirroring the manifest
+// default so a missing or blank configuration value resolves to the
+// same blog-relative subdirectory the extension has always used.
+export const DEFAULT_MEDIA_PATH = "media";
+
 export function normalizeEntryPath(entryPath: string): string {
   return entryPath.replace(/\\/g, "/");
+}
+
+// Resolves the configured (blog-relative) media path against blogDir,
+// returning the absolute media directory only when it stays lexically
+// inside blogDir and is not blogDir itself. A blank value falls back to
+// DEFAULT_MEDIA_PATH; an absolute value, a traversal that escapes the
+// blog, or a value that resolves to the blog root all yield undefined
+// so callers can refuse to expose a media root rather than silently
+// operating on the blog directory or somewhere outside it. This is only
+// the lexical-containment gate; media-specific symlink checks are
+// applied by the caller after this succeeds.
+export function resolveContainedMediaDir(
+  blogDir: string,
+  mediaPath: string | undefined
+): string | undefined {
+  const configured = (mediaPath ?? "").trim() || DEFAULT_MEDIA_PATH;
+  if (path.isAbsolute(configured)) {
+    return undefined;
+  }
+  const resolved = path.resolve(blogDir, configured);
+  if (resolved === blogDir || !isPathInside(resolved, blogDir)) {
+    return undefined;
+  }
+  return resolved;
+}
+
+// Converts an absolute directory selection into the portable,
+// forward-slash blog-relative form stored in vsJournal.mediaPath.
+// Returns undefined when the selection is blogDir itself or is not
+// lexically contained within blogDir, so an outside pick can never be
+// written to configuration.
+export function toPortableBlogRelativePath(
+  blogDir: string,
+  selectedDir: string
+): string | undefined {
+  if (!isPathInside(selectedDir, blogDir)) {
+    return undefined;
+  }
+  const relative = path.relative(blogDir, selectedDir);
+  if (relative === "") {
+    return undefined;
+  }
+  return normalizeEntryPath(relative);
 }
 
 export function isPathInside(childPath: string, parentPath: string): boolean {
