@@ -324,6 +324,17 @@ suite("Media Library", function () {
       .update("mediaPath", undefined, vscode.ConfigurationTarget.Workspace);
   }
 
+  // Directory junctions are unprivileged on Windows (unlike file
+  // symlinks); still, fall back to skipping if the platform refuses.
+  async function trySymlinkDir(target: string, linkPath: string): Promise<boolean> {
+    try {
+      await fs.symlink(target, linkPath, "junction");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   test("vsJournal.setMediaPath is registered and vsJournal.mediaPath defaults to media", async () => {
     await activateExtension();
     const commands = await vscode.commands.getCommands(true);
@@ -399,6 +410,46 @@ suite("Media Library", function () {
       vscode.workspace.getConfiguration("vsJournal").get<string>("mediaPath"),
       before
     );
+  });
+
+  test("a vsJournal.mediaPath that points at a symlinked directory yields no media directory (watcher/resource-root containment)", async () => {
+    await activateExtension();
+    const linkPath = path.join(workspaceRoot(), "blog", "media-link");
+    const outsideDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "vs-journal-media-link-target-")
+    );
+    try {
+      const created = await trySymlinkDir(outsideDir, linkPath);
+      if (!created) {
+        return; // No symlink/junction support here; nothing to assert.
+      }
+      await vscode.workspace
+        .getConfiguration("vsJournal")
+        .update(
+          "mediaPath",
+          "media-link",
+          vscode.ConfigurationTarget.Workspace
+        );
+
+      // upload() resolves the media directory before opening its file
+      // picker and reports an error when it is unavailable/unsafe. A
+      // lexically-contained but symlinked root must land here rather
+      // than being accepted.
+      const errors = await withCapturedErrorMessages((messages) =>
+        withStubbedOpenDialog(undefined, async () => {
+          await vscode.commands.executeCommand("vsJournal.uploadMedia");
+          return messages;
+        })
+      );
+      assert.ok(
+        errors.some((message) => message.includes("unsafe")),
+        "a symlinked media root must be reported as unsafe, not accepted"
+      );
+    } finally {
+      await resetMediaPath();
+      await fs.remove(linkPath);
+      await fs.remove(outsideDir);
+    }
   });
 
   test("the media library stays functional after vsJournal.mediaPath changes, without creating the new directory", async () => {

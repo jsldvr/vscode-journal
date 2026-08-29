@@ -146,6 +146,17 @@ suite("pathUtils", () => {
       undefined
     );
     assert.strictEqual(resolveContainedMediaDir(blogDir, "."), undefined);
+    assert.strictEqual(resolveContainedMediaDir(blogDir, "sub/.."), undefined);
+  });
+
+  test("resolveContainedMediaDir rejects a case-only variant of the blog directory (case-insensitive filesystems)", () => {
+    const blogDir = path.join(tempDir, "blog");
+    // On Windows, path.relative() is case-insensitive, so "../BLOG"
+    // resolves back to blogDir with only a casing difference: a plain
+    // string equality check misses it and the blog root leaks through
+    // as the media root.
+    const caseVariant = "../" + path.basename(blogDir).toUpperCase();
+    assert.strictEqual(resolveContainedMediaDir(blogDir, caseVariant), undefined);
   });
 
   test("toPortableBlogRelativePath converts a contained selection to a forward-slash relative path", () => {

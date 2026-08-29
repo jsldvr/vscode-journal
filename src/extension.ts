@@ -4,7 +4,7 @@ import * as path from "path";
 import moment = require("moment");
 import { BlogIndex } from "./blogIndex";
 import { SearchViewProvider } from "./searchView";
-import { hasSymlinkedAncestor } from "./mediaLibrary";
+import { hasSymlinkedAncestor, isMediaRootWatchable } from "./mediaLibrary";
 import { maybeOfferGitignoreRule } from "./gitignoreGuard";
 import {
   DEFAULT_MEDIA_PATH,
@@ -52,14 +52,18 @@ function configuredMediaPath(): string {
 // configured vsJournal.mediaPath to resolve lexically inside the blog
 // directory -- an absolute or escaping value yields no media directory
 // at all, so an external path never reaches scanning, resource roots,
-// uploads, deletion, or watchers -- and (b) rejects a symlinked
-// ancestor anywhere between the workspace root and the media root.
-// Both checks are explicitly scoped to media only, since upload and
-// delete give an escaping or symlinked path a way to write or delete
-// outside the blog that entries (read-mostly) does not have. Entry
-// containment is intentionally left unchanged; it has the same latent
-// gap, but fixing it is a separate, pre-existing concern outside this
-// feature's scope.
+// uploads, deletion, or watchers -- (b) rejects a symlinked ancestor
+// anywhere between the workspace root and the media root, and (c)
+// rejects a media root that is itself a symlink (or not a directory).
+// (c) matters here specifically because the watcher and the webview's
+// resource roots consume this path directly and, unlike scan/upload/
+// delete, do not re-check the root -- and hasSymlinkedAncestor
+// deliberately never inspects the root itself. All three checks are
+// explicitly scoped to media only, since upload and delete give an
+// escaping or symlinked path a way to write or delete outside the blog
+// that entries (read-mostly) does not have. Entry containment is
+// intentionally left unchanged; it has the same latent gap, but fixing
+// it is a separate, pre-existing concern outside this feature's scope.
 async function resolveMediaDir(): Promise<string | undefined> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   const blogDir = resolveBlogDir();
@@ -71,6 +75,9 @@ async function resolveMediaDir(): Promise<string | undefined> {
     return undefined;
   }
   if (await hasSymlinkedAncestor(workspaceFolder.uri.fsPath, mediaDir)) {
+    return undefined;
+  }
+  if (!(await isMediaRootWatchable(mediaDir))) {
     return undefined;
   }
   return mediaDir;
@@ -215,16 +222,29 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   let mediaWatcherDisposable: vscode.Disposable | undefined;
+  let mediaWatcherGeneration = 0;
 
   // Rebinding is safe to call repeatedly: dispose+recreate. Called on
-  // activation, on a blogPath change, and after an upload that just
-  // created media/ on demand -- a watcher bound before the directory
-  // existed may never have started watching it.
+  // activation, on a blogPath change, on a mediaPath change, and after
+  // an upload that just created the media directory on demand -- a
+  // watcher bound before the directory existed may never have started
+  // watching it. createMediaWatcher() is async, so two rebinds can be
+  // in flight at once (e.g. two quick mediaPath edits); a generation
+  // token ensures only the newest call's watcher is retained and any
+  // watcher produced by a superseded call is disposed rather than left
+  // bound to a stale directory.
   async function rebindMediaWatcher(): Promise<void> {
+    const generation = ++mediaWatcherGeneration;
     mediaWatcherDisposable?.dispose();
-    mediaWatcherDisposable = await createMediaWatcher(refreshMediaView);
-    if (mediaWatcherDisposable) {
-      context.subscriptions.push(mediaWatcherDisposable);
+    mediaWatcherDisposable = undefined;
+    const next = await createMediaWatcher(refreshMediaView);
+    if (generation !== mediaWatcherGeneration) {
+      next?.dispose();
+      return;
+    }
+    mediaWatcherDisposable = next;
+    if (next) {
+      context.subscriptions.push(next);
     }
   }
 

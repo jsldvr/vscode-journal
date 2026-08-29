@@ -31,7 +31,13 @@ export function resolveContainedMediaDir(
     return undefined;
   }
   const resolved = path.resolve(blogDir, configured);
-  if (resolved === blogDir || !isPathInside(resolved, blogDir)) {
+  // An empty relative means blogDir itself -- including a case-only
+  // variant on case-insensitive filesystems, where path.relative()
+  // normalizes casing and a plain `resolved === blogDir` would miss it.
+  // A leading ".." or an absolute relative means the value escapes the
+  // blog directory.
+  const relative = path.relative(blogDir, resolved);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
     return undefined;
   }
   return resolved;
