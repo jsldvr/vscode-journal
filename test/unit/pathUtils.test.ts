@@ -231,6 +231,27 @@ suite("pathUtils", () => {
     );
   });
 
+  test("toWorkspaceRelativeDisplayPath labels a contained directory whose name starts with two dots", () => {
+    const workspaceRoot = path.join(tempDir, "ws");
+    // A workspace-root blog (blogPath ".") with mediaPath "..assets"
+    // resolves to a legitimately contained directory -- its label must
+    // match, not read "unavailable", so heading and reveal target agree.
+    assert.strictEqual(
+      toWorkspaceRelativeDisplayPath(
+        workspaceRoot,
+        path.join(workspaceRoot, "..assets")
+      ),
+      "..assets"
+    );
+    assert.strictEqual(
+      toWorkspaceRelativeDisplayPath(
+        workspaceRoot,
+        path.join(workspaceRoot, "..assets", "pics")
+      ),
+      "..assets/pics"
+    );
+  });
+
   test("toWorkspaceRelativeDisplayPath rejects the workspace root itself and anything outside it", () => {
     const workspaceRoot = path.join(tempDir, "ws");
     assert.strictEqual(

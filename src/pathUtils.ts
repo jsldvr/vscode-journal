@@ -74,18 +74,20 @@ export function toPortableBlogRelativePath(
 // workspaceRoot, using forward slashes (e.g. "blog/assets"). Returns
 // undefined when dir is workspaceRoot itself or is not lexically
 // contained within it, so callers can fall back to an "unavailable"
-// label rather than ever surfacing an absolute filesystem path. This
+// label rather than ever surfacing an absolute filesystem path. Uses
+// the same boundary-aware containment check as resolveContainedMediaDir
+// so a legitimately contained directory whose own name begins with two
+// dots (e.g. "..assets") is labelled, not rejected as traversal. This
 // is presentation only -- it performs no filesystem access and implies
 // nothing about whether dir exists.
 export function toWorkspaceRelativeDisplayPath(
   workspaceRoot: string,
   dir: string
 ): string | undefined {
-  if (!isPathInside(dir, workspaceRoot)) {
+  if (!isStrictlyInside(workspaceRoot, dir)) {
     return undefined;
   }
-  const relative = normalizeEntryPath(path.relative(workspaceRoot, dir));
-  return relative.length > 0 ? relative : undefined;
+  return normalizeEntryPath(path.relative(workspaceRoot, dir));
 }
 
 export function isPathInside(childPath: string, parentPath: string): boolean {
