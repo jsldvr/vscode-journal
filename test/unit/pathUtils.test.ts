@@ -10,6 +10,7 @@ import {
   normalizeEntryPath,
   resolveContainedMediaDir,
   toPortableBlogRelativePath,
+  toWorkspaceRelativeDisplayPath,
 } from "../../src/pathUtils";
 
 async function makeTempDir(): Promise<string> {
@@ -203,6 +204,52 @@ suite("pathUtils", () => {
     assert.strictEqual(
       toPortableBlogRelativePath(blogDir, path.join(blogDir, "..assets", "pics")),
       "..assets/pics"
+    );
+  });
+
+  test("toWorkspaceRelativeDisplayPath formats a contained directory as a forward-slash relative label", () => {
+    const workspaceRoot = path.join(tempDir, "ws");
+    assert.strictEqual(
+      toWorkspaceRelativeDisplayPath(
+        workspaceRoot,
+        path.join(workspaceRoot, "blog", "assets")
+      ),
+      "blog/assets"
+    );
+  });
+
+  test("toWorkspaceRelativeDisplayPath returns a portable label for a directory that need not exist", () => {
+    const workspaceRoot = path.join(tempDir, "ws");
+    // Pure string formatting -- no filesystem access, so a not-yet-created
+    // media directory still yields its configured display label.
+    assert.strictEqual(
+      toWorkspaceRelativeDisplayPath(
+        workspaceRoot,
+        path.join(workspaceRoot, "blog", "media-does-not-exist")
+      ),
+      "blog/media-does-not-exist"
+    );
+  });
+
+  test("toWorkspaceRelativeDisplayPath rejects the workspace root itself and anything outside it", () => {
+    const workspaceRoot = path.join(tempDir, "ws");
+    assert.strictEqual(
+      toWorkspaceRelativeDisplayPath(workspaceRoot, workspaceRoot),
+      undefined
+    );
+    assert.strictEqual(
+      toWorkspaceRelativeDisplayPath(
+        workspaceRoot,
+        path.join(tempDir, "outside")
+      ),
+      undefined
+    );
+    assert.strictEqual(
+      toWorkspaceRelativeDisplayPath(
+        workspaceRoot,
+        path.join(workspaceRoot, "..", "sibling")
+      ),
+      undefined
     );
   });
 

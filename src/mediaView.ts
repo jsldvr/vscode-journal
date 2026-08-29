@@ -29,6 +29,15 @@ export interface MediaControllerDeps {
   // because resolving it safely requires walking and lstat-ing the
   // path ancestry.
   getMediaDir(): Promise<string | undefined>;
+  // Formats the media location for the section heading from the exact
+  // mediaDir snapshot pushState() just resolved via getMediaDir() --
+  // passed as a formatter over a caller-supplied value, never a second
+  // resolver, so the heading label can never combine configuration from
+  // a different generation than the file scan. Given undefined (no safe
+  // target) it returns the "unavailable" fallback; given a resolved
+  // directory it returns a portable workspace-relative label such as
+  // "blog/assets", even when that directory does not exist on disk yet.
+  describeMediaLocation(mediaDir: string | undefined): string;
   // Called after upload has ensured mediaDir exists, so the caller can
   // rebind a watcher that may have been created before the directory
   // existed.
@@ -116,6 +125,7 @@ export class MediaController {
         type: "mediaDisabled",
         reason:
           "No workspace open, the configured blog path is outside the workspace, or the media path is unsafe.",
+        location: this.deps.describeMediaLocation(undefined),
       });
       // sync, not show: this is a background refresh path, not a user
       // selection -- a hidden details tab must not be yanked to the
@@ -128,6 +138,7 @@ export class MediaController {
       this.post({
         type: "mediaFiles",
         files: files.map((file) => this.toWire(mediaDir, file)),
+        location: this.deps.describeMediaLocation(mediaDir),
       });
       if (this.detailsPanel) {
         const current = files.find((file) => file.path === this.detailsPanel?.currentPath);
@@ -149,6 +160,7 @@ export class MediaController {
       this.post({
         type: "mediaDisabled",
         reason: "Failed to load media files. The media directory may be unavailable or unsafe.",
+        location: this.deps.describeMediaLocation(mediaDir),
       });
       this.detailsPanel?.syncUnavailable();
     }
@@ -452,7 +464,7 @@ export class MediaController {
 // with the entries search bar for position:sticky/top:0 in the same
 // scroll context.
 export const MEDIA_BODY_HTML = `
-  <div class="section-heading">Media</div>
+  <div class="section-heading" id="media-heading">Media</div>
   <div id="media-section">
     <div class="media-toolbar">
       <input id="media-search" type="text" placeholder="Search media..." aria-label="Search media files" autocomplete="off" spellcheck="false">
@@ -488,6 +500,13 @@ export const MEDIA_STYLES = `
     text-transform: uppercase;
     letter-spacing: 0.04em;
     border-top: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border, transparent));
+  }
+  /* The location label can be long; keep it to one line and let the
+     tooltip carry the full text rather than wrapping the sidebar. */
+  #media-heading {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
   #media-section {
     max-height: 60vh;
@@ -611,6 +630,7 @@ export const MEDIA_STYLES = `
 // something the sidebar tracks, highlights, or restores.
 export const MEDIA_SCRIPT = `
 function initMedia(vscode, state, save) {
+  var headingEl = document.getElementById("media-heading");
   var searchInput = document.getElementById("media-search");
   var typeFilter = document.getElementById("media-type-filter");
   var uploadButton = document.getElementById("media-upload");
@@ -626,12 +646,14 @@ function initMedia(vscode, state, save) {
     query: "",
     filter: "all",
     files: [],
+    location: "",
     disabled: false,
     disabledReason: "",
     loaded: false,
   };
   var m = state.media;
   m.files = m.files || [];
+  m.location = m.location || "";
   // Older persisted state may still carry a selectedPath from before
   // selection moved to the editor area -- never restore it.
   delete m.selectedPath;
@@ -639,6 +661,16 @@ function initMedia(vscode, state, save) {
   function setStatus(text, isError) {
     statusEl.textContent = text || "";
     statusEl.className = isError ? "error" : "";
+  }
+
+  // Dynamic text: assigned through textContent only. The backend sends
+  // just the portable path (or "unavailable"); the "Media: " prefix is
+  // composed here. The tooltip carries the full label so a truncated
+  // long path is still fully readable on hover.
+  function renderHeading() {
+    var label = m.location ? "Media: " + m.location : "Media";
+    headingEl.textContent = label;
+    headingEl.title = label;
   }
 
   function matchesFilter(file) {
@@ -727,6 +759,7 @@ function initMedia(vscode, state, save) {
   }
 
   function render() {
+    renderHeading();
     renderDisabled();
     if (m.disabled) {
       gridEl.textContent = "";
@@ -765,6 +798,7 @@ function initMedia(vscode, state, save) {
         m.disabled = false;
         m.disabledReason = "";
         m.files = message.files;
+        m.location = message.location || "";
         m.loaded = true;
         save();
         render();
@@ -772,6 +806,7 @@ function initMedia(vscode, state, save) {
       mediaDisabled: function (message) {
         m.disabled = true;
         m.disabledReason = message.reason;
+        m.location = message.location || "";
         m.loaded = true;
         save();
         render();

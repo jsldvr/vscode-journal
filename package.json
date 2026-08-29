@@ -34,6 +34,7 @@
     "onCommand:vsJournal.rescanEntries",
     "onCommand:vsJournal.uploadMedia",
     "onCommand:vsJournal.refreshMediaLibrary",
+    "onCommand:vsJournal.revealMediaDirectory",
     "onView:vsJournal.search"
   ],
   "main": "./out/extension.js",
@@ -108,6 +109,11 @@
         "title": "Refresh Media Library",
         "category": "Journal",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "vsJournal.revealMediaDirectory",
+        "title": "Reveal Media Directory",
+        "category": "Journal"
       }
     ],
     "views": {
@@ -145,6 +151,11 @@
           "command": "vsJournal.rescanEntries",
           "when": "view == vsJournal.search",
           "group": "navigation"
+        },
+        {
+          "command": "vsJournal.revealMediaDirectory",
+          "when": "view == vsJournal.search",
+          "group": "1_media"
         }
       ],
       "commandPalette": [
@@ -173,6 +184,9 @@
         },
         {
           "command": "vsJournal.refreshMediaLibrary"
+        },
+        {
+          "command": "vsJournal.revealMediaDirectory"
         }
       ]
     },

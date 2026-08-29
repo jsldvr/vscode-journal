@@ -70,6 +70,24 @@ export function toPortableBlogRelativePath(
   return normalizeEntryPath(path.relative(blogDir, selectedDir));
 }
 
+// Formats an absolute directory as a display label relative to
+// workspaceRoot, using forward slashes (e.g. "blog/assets"). Returns
+// undefined when dir is workspaceRoot itself or is not lexically
+// contained within it, so callers can fall back to an "unavailable"
+// label rather than ever surfacing an absolute filesystem path. This
+// is presentation only -- it performs no filesystem access and implies
+// nothing about whether dir exists.
+export function toWorkspaceRelativeDisplayPath(
+  workspaceRoot: string,
+  dir: string
+): string | undefined {
+  if (!isPathInside(dir, workspaceRoot)) {
+    return undefined;
+  }
+  const relative = normalizeEntryPath(path.relative(workspaceRoot, dir));
+  return relative.length > 0 ? relative : undefined;
+}
+
 export function isPathInside(childPath: string, parentPath: string): boolean {
   const relative = path.relative(parentPath, childPath);
   return (

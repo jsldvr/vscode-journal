@@ -4,7 +4,11 @@ import * as path from "path";
 import moment = require("moment");
 import { BlogIndex } from "./blogIndex";
 import { SearchViewProvider } from "./searchView";
-import { hasSymlinkedAncestor, isMediaRootWatchable } from "./mediaLibrary";
+import {
+  hasSymlinkedAncestor,
+  isMediaRootDirectory,
+  isMediaRootWatchable,
+} from "./mediaLibrary";
 import { maybeOfferGitignoreRule } from "./gitignoreGuard";
 import {
   DEFAULT_MEDIA_PATH,
@@ -12,7 +16,12 @@ import {
   isPathInside,
   resolveContainedMediaDir,
   toPortableBlogRelativePath,
+  toWorkspaceRelativeDisplayPath,
 } from "./pathUtils";
+
+// Shown in the Media heading and by the reveal command when no safe
+// media target can be resolved.
+const MEDIA_LOCATION_UNAVAILABLE = "unavailable";
 
 let activeHost: IndexHost | undefined;
 
@@ -81,6 +90,58 @@ async function resolveMediaDir(): Promise<string | undefined> {
     return undefined;
   }
   return mediaDir;
+}
+
+// Presentation label for the Media heading, formatted from the exact
+// mediaDir snapshot pushState() already resolved -- never a second
+// configuration read -- so the label cannot drift from the file scan.
+// A resolved directory becomes a portable workspace-relative path
+// (e.g. "blog/assets") whether or not it exists on disk yet; undefined
+// (or a target that somehow escapes the workspace) becomes the
+// unavailable fallback so an absolute filesystem path is never shown.
+function describeMediaLocation(mediaDir: string | undefined): string {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!mediaDir || !workspaceFolder) {
+    return MEDIA_LOCATION_UNAVAILABLE;
+  }
+  return (
+    toWorkspaceRelativeDisplayPath(workspaceFolder.uri.fsPath, mediaDir) ??
+    MEDIA_LOCATION_UNAVAILABLE
+  );
+}
+
+// Reveals the current media directory in the OS file manager. The
+// target is resolved fresh through resolveMediaDir() at invocation --
+// never a cached path, since configuration or an ancestor's symlink
+// status may have changed since the heading was last drawn -- and is
+// revealed only when it currently exists as a real (non-symlinked)
+// directory. A missing (not-yet-created), unsafe, or unresolvable
+// target reports an error and reveals nothing. Nothing here creates
+// the directory or falls back to an ancestor.
+async function revealMediaDirectory(): Promise<void> {
+  try {
+    const mediaDir = await resolveMediaDir();
+    if (!mediaDir) {
+      vscode.window.showErrorMessage(
+        "No safe media directory is available. Check vsJournal.blogPath and vsJournal.mediaPath."
+      );
+      return;
+    }
+    if (!(await isMediaRootDirectory(mediaDir))) {
+      vscode.window.showErrorMessage(
+        "The media directory does not exist yet. Upload a media file to create it."
+      );
+      return;
+    }
+    await vscode.commands.executeCommand(
+      "revealFileInOS",
+      vscode.Uri.file(mediaDir)
+    );
+  } catch (error) {
+    vscode.window.showErrorMessage(
+      `Failed to reveal media directory: ${error}`
+    );
+  }
 }
 
 // Owns the lifecycle of the SQLite index for the configured journal:
@@ -181,6 +242,7 @@ export function activate(context: vscode.ExtensionContext) {
     },
     {
       getMediaDir: () => resolveMediaDir(),
+      describeMediaLocation: (mediaDir) => describeMediaLocation(mediaDir),
       onMediaDirEnsured: () => void rebindMediaWatcher(),
     }
   );
@@ -352,6 +414,13 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  const revealMediaDirectoryCommand = vscode.commands.registerCommand(
+    "vsJournal.revealMediaDirectory",
+    async () => {
+      await revealMediaDirectory();
+    }
+  );
+
   context.subscriptions.push(
     newEntryCommand,
     openBlogCommand,
@@ -364,7 +433,8 @@ export function activate(context: vscode.ExtensionContext) {
     setMediaPathCommand,
     rescanCommand,
     uploadMediaCommand,
-    refreshMediaLibraryCommand
+    refreshMediaLibraryCommand,
+    revealMediaDirectoryCommand
   );
 
   const configChangeListener = vscode.workspace.onDidChangeConfiguration(

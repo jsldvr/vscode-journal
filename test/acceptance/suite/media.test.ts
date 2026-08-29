@@ -236,6 +236,7 @@ suite("Media Library", function () {
         getMediaDir: async () => {
           throw new Error("boom");
         },
+        describeMediaLocation: () => "blog/media",
         onMediaDirEnsured: () => undefined,
         requestFullRefresh: async () => undefined,
       },
@@ -257,6 +258,7 @@ suite("Media Library", function () {
     const controller = new MediaController(
       {
         getMediaDir: async () => undefined,
+        describeMediaLocation: () => "unavailable",
         onMediaDirEnsured: () => undefined,
         requestFullRefresh: async () => undefined,
       },
@@ -323,6 +325,243 @@ suite("Media Library", function () {
       .getConfiguration("vsJournal")
       .update("mediaPath", undefined, vscode.ConfigurationTarget.Workspace);
   }
+
+  interface CapturedCommand {
+    command: string;
+    args: unknown[];
+  }
+
+  // Captures vscode.commands.executeCommand calls (so revealFileInOS
+  // never actually opens the OS file manager during the run) while
+  // still delegating every other command to the real implementation,
+  // and always restores the original in finally.
+  async function withCapturedExecuteCommand<T>(
+    run: (calls: CapturedCommand[]) => Promise<T>
+  ): Promise<T> {
+    const original = vscode.commands.executeCommand;
+    const calls: CapturedCommand[] = [];
+    (vscode.commands as unknown as { executeCommand: unknown }).executeCommand =
+      async (command: string, ...args: unknown[]) => {
+        calls.push({ command, args });
+        if (command === "revealFileInOS") {
+          return undefined;
+        }
+        return (
+          original as (command: string, ...rest: unknown[]) => Thenable<unknown>
+        ).call(vscode.commands, command, ...args);
+      };
+    try {
+      return await run(calls);
+    } finally {
+      (vscode.commands as unknown as { executeCommand: unknown }).executeCommand =
+        original;
+    }
+  }
+
+  function revealedPaths(calls: CapturedCommand[]): string[] {
+    return calls
+      .filter((call) => call.command === "revealFileInOS")
+      .map((call) => (call.args[0] as vscode.Uri).fsPath);
+  }
+
+  test("vsJournal.revealMediaDirectory is registered and contributed to the view/title overflow (non-navigation group)", async () => {
+    await activateExtension();
+    const commands = await vscode.commands.getCommands(true);
+    assert.ok(commands.includes("vsJournal.revealMediaDirectory"));
+
+    const extension = vscode.extensions.getExtension("jsldvr.vscode-journal");
+    assert.ok(extension);
+    const viewTitle: Array<{ command: string; when?: string; group?: string }> =
+      extension.packageJSON.contributes.menus["view/title"];
+    const entry = viewTitle.find(
+      (item) => item.command === "vsJournal.revealMediaDirectory"
+    );
+    assert.ok(entry, "reveal command must be contributed to view/title");
+    assert.strictEqual(entry.when, "view == vsJournal.search");
+    assert.ok(
+      entry.group && !entry.group.startsWith("navigation"),
+      "a non-navigation group keeps the command in the native overflow, not the title bar"
+    );
+  });
+
+  test("MediaController outbound state carries the location label for populated, empty, missing, and disabled states", async () => {
+    const emptyRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "vs-journal-media-loc-")
+    );
+    try {
+      const posts: Record<string, unknown>[] = [];
+      const controller = new MediaController(
+        {
+          getMediaDir: async () => emptyRoot,
+          describeMediaLocation: () => "blog/assets",
+          onMediaDirEnsured: () => undefined,
+          requestFullRefresh: async () => undefined,
+        },
+        (message) => posts.push(message)
+      );
+      await controller.pushState();
+      const filesMessage = posts.find((m) => m.type === "mediaFiles");
+      assert.ok(filesMessage, "a real media root pushes mediaFiles");
+      assert.strictEqual(filesMessage.location, "blog/assets");
+      assert.deepStrictEqual(filesMessage.files, []);
+    } finally {
+      await fs.remove(emptyRoot);
+    }
+
+    // A valid but not-yet-created media directory still reports its label.
+    const missingRoot = path.join(
+      os.tmpdir(),
+      `vs-journal-media-missing-${Date.now()}`
+    );
+    const missingPosts: Record<string, unknown>[] = [];
+    const missingController = new MediaController(
+      {
+        getMediaDir: async () => missingRoot,
+        describeMediaLocation: () => "blog/assets",
+        onMediaDirEnsured: () => undefined,
+        requestFullRefresh: async () => undefined,
+      },
+      (message) => missingPosts.push(message)
+    );
+    await missingController.pushState();
+    const missingMessage = missingPosts.find((m) => m.type === "mediaFiles");
+    assert.ok(missingMessage);
+    assert.strictEqual(missingMessage.location, "blog/assets");
+    assert.strictEqual(
+      await fs.pathExists(missingRoot),
+      false,
+      "resolving a display label must not create the directory"
+    );
+
+    // A disabled (unsafe / no workspace) state still carries a label so
+    // the heading never goes stale.
+    const disabledPosts: Record<string, unknown>[] = [];
+    const disabledController = new MediaController(
+      {
+        getMediaDir: async () => undefined,
+        describeMediaLocation: () => "unavailable",
+        onMediaDirEnsured: () => undefined,
+        requestFullRefresh: async () => undefined,
+      },
+      (message) => disabledPosts.push(message)
+    );
+    await disabledController.pushState();
+    const disabledMessage = disabledPosts.find((m) => m.type === "mediaDisabled");
+    assert.ok(disabledMessage);
+    assert.strictEqual(disabledMessage.location, "unavailable");
+  });
+
+  test("revealMediaDirectory reveals the resolved current media directory when it exists", async () => {
+    await activateExtension();
+    const mediaDir = path.join(workspaceRoot(), "blog", "media");
+    await fs.ensureDir(mediaDir);
+    try {
+      const calls = await withCapturedExecuteCommand(async (captured) => {
+        await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+        return captured;
+      });
+      assert.deepStrictEqual(revealedPaths(calls), [mediaDir]);
+    } finally {
+      await fs.remove(mediaDir);
+    }
+  });
+
+  test("changing vsJournal.mediaPath changes the reveal target", async () => {
+    await activateExtension();
+    const altDir = path.join(workspaceRoot(), "blog", "media-alt");
+    await fs.ensureDir(altDir);
+    try {
+      await vscode.workspace
+        .getConfiguration("vsJournal")
+        .update("mediaPath", "media-alt", vscode.ConfigurationTarget.Workspace);
+      const calls = await withCapturedExecuteCommand(async (captured) => {
+        await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+        return captured;
+      });
+      assert.deepStrictEqual(revealedPaths(calls), [altDir]);
+    } finally {
+      await resetMediaPath();
+      await fs.remove(altDir);
+    }
+  });
+
+  test("revealMediaDirectory reports an error and reveals nothing when the media directory does not exist", async () => {
+    await activateExtension();
+    const mediaDir = path.join(workspaceRoot(), "blog", "media");
+    await fs.remove(mediaDir);
+    const errors = await withCapturedErrorMessages((messages) =>
+      withCapturedExecuteCommand(async (calls) => {
+        await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+        assert.deepStrictEqual(
+          revealedPaths(calls),
+          [],
+          "a missing media directory must not be revealed"
+        );
+        return messages;
+      })
+    );
+    assert.ok(
+      errors.some((message) => message.includes("does not exist")),
+      "a missing media directory must report a clear error"
+    );
+    assert.strictEqual(
+      await fs.pathExists(mediaDir),
+      false,
+      "the reveal command must never create the media directory"
+    );
+  });
+
+  test("revealMediaDirectory reports an error and reveals nothing when the media root is a plain file", async () => {
+    await activateExtension();
+    const mediaPath = path.join(workspaceRoot(), "blog", "media");
+    await fs.remove(mediaPath);
+    await fs.ensureDir(path.dirname(mediaPath));
+    await fs.writeFile(mediaPath, "not a directory");
+    try {
+      const errors = await withCapturedErrorMessages((messages) =>
+        withCapturedExecuteCommand(async (calls) => {
+          await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+          assert.deepStrictEqual(revealedPaths(calls), []);
+          return messages;
+        })
+      );
+      assert.ok(errors.length > 0, "a non-directory media root must report an error");
+    } finally {
+      await fs.remove(mediaPath);
+    }
+  });
+
+  test("revealMediaDirectory reports an error and reveals nothing when the media root is a symlink", async () => {
+    await activateExtension();
+    const linkPath = path.join(workspaceRoot(), "blog", "media-link");
+    const outsideDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "vs-journal-reveal-link-target-")
+    );
+    try {
+      const created = await trySymlinkDir(outsideDir, linkPath);
+      if (!created) {
+        return; // No symlink/junction support here; nothing to assert.
+      }
+      await vscode.workspace
+        .getConfiguration("vsJournal")
+        .update("mediaPath", "media-link", vscode.ConfigurationTarget.Workspace);
+      const errors = await withCapturedErrorMessages((messages) =>
+        withCapturedExecuteCommand(async (calls) => {
+          await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+          assert.deepStrictEqual(revealedPaths(calls), []);
+          return messages;
+        })
+      );
+      assert.ok(
+        errors.length > 0,
+        "a symlinked media root must report an error, not be revealed"
+      );
+    } finally {
+      await resetMediaPath();
+      await fs.remove(linkPath);
+      await fs.remove(outsideDir);
+    }
+  });
 
   // Directory junctions are unprivileged on Windows (unlike file
   // symlinks); still, fall back to skipping if the platform refuses.
@@ -487,6 +726,7 @@ suite("Media Library", function () {
       const controller = new MediaController(
         {
           getMediaDir: async () => (calls++ === 0 ? rootA : rootB),
+          describeMediaLocation: () => "blog/media",
           onMediaDirEnsured: () => undefined,
           requestFullRefresh: async () => undefined,
         },

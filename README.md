@@ -82,6 +82,13 @@ created automatically the first time you upload a file -- it is never
 created merely by opening the extension, by opening the folder picker, or
 by changing the setting.
 
+The Media heading shows the current location as a workspace-relative path,
+for example `Media: blog/assets` (a long path is truncated with the full
+label on hover). It reflects `vsJournal.blogPath` and `vsJournal.mediaPath`
+and updates whenever either changes; it reads `Media: unavailable` when no
+safe directory can be resolved. A valid but not-yet-created directory still
+shows its configured path -- displaying the path never creates it.
+
 The media directory must stay within the configured blog directory. A
 `vsJournal.mediaPath` value that is absolute or escapes the blog directory
 (for example `../shared`) is refused: the Media section reports an
@@ -117,6 +124,11 @@ setting unchanged.
   from the Command Palette; the same actions are also available as buttons
   in the Media toolbar itself. `Journal: Set Media Directory` opens a folder
   picker to change `vsJournal.mediaPath`.
+- `Journal: Reveal Media Directory` is in the Journal view toolbar overflow
+  menu (the `...` button) and the Command Palette. It reveals the current
+  media directory in your OS file manager. A missing, unsafe, or symlinked
+  directory is not created or revealed -- the command reports an error
+  instead.
 
 ## Git and the generated index
 
