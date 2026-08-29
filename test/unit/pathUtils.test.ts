@@ -159,6 +159,20 @@ suite("pathUtils", () => {
     assert.strictEqual(resolveContainedMediaDir(blogDir, caseVariant), undefined);
   });
 
+  test("resolveContainedMediaDir accepts a contained directory whose name starts with two dots", () => {
+    const blogDir = path.join(tempDir, "blog");
+    // "..assets" is an ordinary contained subdirectory, not traversal --
+    // a bare startsWith("..") check would wrongly reject it.
+    assert.strictEqual(
+      resolveContainedMediaDir(blogDir, "..assets"),
+      path.join(blogDir, "..assets")
+    );
+    assert.strictEqual(
+      resolveContainedMediaDir(blogDir, "..assets/pics"),
+      path.join(blogDir, "..assets", "pics")
+    );
+  });
+
   test("toPortableBlogRelativePath converts a contained selection to a forward-slash relative path", () => {
     const blogDir = path.join(tempDir, "blog");
     assert.strictEqual(
@@ -177,6 +191,18 @@ suite("pathUtils", () => {
     assert.strictEqual(
       toPortableBlogRelativePath(blogDir, path.join(blogDir, "..", "sibling")),
       undefined
+    );
+  });
+
+  test("toPortableBlogRelativePath accepts a contained directory whose name starts with two dots", () => {
+    const blogDir = path.join(tempDir, "blog");
+    assert.strictEqual(
+      toPortableBlogRelativePath(blogDir, path.join(blogDir, "..assets")),
+      "..assets"
+    );
+    assert.strictEqual(
+      toPortableBlogRelativePath(blogDir, path.join(blogDir, "..assets", "pics")),
+      "..assets/pics"
     );
   });
 

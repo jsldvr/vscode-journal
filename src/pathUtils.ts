@@ -13,6 +13,24 @@ export function normalizeEntryPath(entryPath: string): string {
   return entryPath.replace(/\\/g, "/");
 }
 
+// True when `child` resolves to a directory strictly below `base` --
+// excluding `base` itself and anything reached by traversal. Unlike a
+// bare `relative.startsWith("..")` test, an ordinary contained
+// directory whose own name begins with two dots (relative "..assets")
+// is kept, while real traversal ("..", "../x") and absolute relatives
+// are rejected. On case-insensitive filesystems path.relative()
+// normalizes casing, so a case-only variant of `base` collapses to ""
+// and is treated as `base` itself.
+function isStrictlyInside(base: string, child: string): boolean {
+  const relative = path.relative(base, child);
+  return (
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(".." + path.sep) &&
+    !path.isAbsolute(relative)
+  );
+}
+
 // Resolves the configured (blog-relative) media path against blogDir,
 // returning the absolute media directory only when it stays lexically
 // inside blogDir and is not blogDir itself. A blank value falls back to
@@ -31,13 +49,7 @@ export function resolveContainedMediaDir(
     return undefined;
   }
   const resolved = path.resolve(blogDir, configured);
-  // An empty relative means blogDir itself -- including a case-only
-  // variant on case-insensitive filesystems, where path.relative()
-  // normalizes casing and a plain `resolved === blogDir` would miss it.
-  // A leading ".." or an absolute relative means the value escapes the
-  // blog directory.
-  const relative = path.relative(blogDir, resolved);
-  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+  if (!isStrictlyInside(blogDir, resolved)) {
     return undefined;
   }
   return resolved;
@@ -52,14 +64,10 @@ export function toPortableBlogRelativePath(
   blogDir: string,
   selectedDir: string
 ): string | undefined {
-  if (!isPathInside(selectedDir, blogDir)) {
+  if (!isStrictlyInside(blogDir, selectedDir)) {
     return undefined;
   }
-  const relative = path.relative(blogDir, selectedDir);
-  if (relative === "") {
-    return undefined;
-  }
-  return normalizeEntryPath(relative);
+  return normalizeEntryPath(path.relative(blogDir, selectedDir));
 }
 
 export function isPathInside(childPath: string, parentPath: string): boolean {
