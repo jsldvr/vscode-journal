@@ -31,6 +31,30 @@ export function escapeSnippetText(text: string): string {
     .replace(/\}/g, "\\}");
 }
 
+// Percent-encodes a forward-slash link destination for Markdown: each
+// "/"-separated segment is encoded (so a space, "#", "?", "%" etc. in a
+// filename or a configured media path cannot break the "(...)"
+// destination) while the "/" separators are preserved. encodeURIComponent
+// leaves "(" and ")" untouched, so those are additionally encoded here --
+// an unbalanced parenthesis in a filename would otherwise terminate the
+// link early.
+export function encodeMarkdownDestination(destination: string): string {
+  return destination
+    .split("/")
+    .map((segment) =>
+      encodeURIComponent(segment).replace(/\(/g, "%28").replace(/\)/g, "%29")
+    )
+    .join("/");
+}
+
+// Backslash-escapes the characters that would otherwise terminate or
+// misparse a "[...]" Markdown link label: "\", "[", and "]". Applied
+// before snippet escaping so the backslashes it introduces survive as
+// literal backslashes through the snippet layer.
+export function escapeMarkdownLinkText(text: string): string {
+  return text.replace(/[\\[\]]/g, (character) => `\\${character}`);
+}
+
 // Joins the portable media-directory path (blog-relative, e.g. "media"
 // or "assets/uploads") and the media-relative file path into a single
 // forward-slash link target. Both parts are already normalized to
@@ -45,13 +69,17 @@ export function composeMediaTarget(
 // Image:  ![${1:alt text}](target)  -- "alt text" is an editable
 //         placeholder selected for immediate replacement.
 // Other:  [basename](target)
-// The dynamic label and target are emitted as literal (escaped) snippet
-// text; only the alt-text placeholder is real snippet syntax. For an
-// ordinary filename the output matches the documented examples exactly.
+// The destination is percent-encoded and the non-image label is
+// Markdown-escaped so an arbitrary uploaded filename (spaces,
+// parentheses, brackets, "#", ...) still yields a valid link; both are
+// then snippet-escaped so nothing dynamic is parsed as snippet syntax.
+// Only the alt-text placeholder is real snippet syntax. For an ordinary
+// filename the output matches the documented examples exactly.
 export function buildMediaSnippetBody(input: MediaSnippetInput): string {
-  const target = escapeSnippetText(input.target);
+  const target = escapeSnippetText(encodeMarkdownDestination(input.target));
   if (input.isImage) {
     return `![\${1:alt text}](${target})`;
   }
-  return `[${escapeSnippetText(input.label)}](${target})`;
+  const label = escapeSnippetText(escapeMarkdownLinkText(input.label));
+  return `[${label}](${target})`;
 }

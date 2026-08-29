@@ -922,6 +922,33 @@ suite("Media Insertion", function () {
     }
   });
 
+  test("a filename with spaces and parentheses is percent-encoded into a valid link", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["screen shot (1).png"]);
+    try {
+      await withActiveEntry("2026/08/29/insert-encoded.md", "# Entry\n\n", async (editor) => {
+        editor.selection = new vscode.Selection(2, 0, 2, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, { mediaDir: root });
+
+        await controller.dispatch({
+          type: "mediaInsert",
+          path: "screen shot (1).png",
+        });
+
+        assert.ok(
+          editor.document
+            .getText()
+            .includes("![alt text](media/screen%20shot%20%281%29.png)"),
+          "spaces and parentheses in the destination must be percent-encoded"
+        );
+        assert.notStrictEqual(lastStatus(posts)?.isError, true, "insertion must succeed");
+      });
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
   test("the image alt-text placeholder is selected for immediate replacement", async () => {
     await activateExtension();
     const root = await makeMediaRoot(["pic.png"]);

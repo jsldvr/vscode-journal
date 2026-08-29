@@ -115,7 +115,9 @@ setting unchanged.
   `alt text` is a snippet placeholder, already selected so you can type the real
   text immediately. The link target uses your configured `vsJournal.mediaPath`
   (so `assets/uploads` produces `assets/uploads/...`), always with forward
-  slashes. Insertion only happens when the active editor is a saved Markdown
+  slashes, and is percent-encoded so names with spaces or parentheses (such as
+  screenshots) still produce a valid link. Insertion only happens when the
+  active editor is a saved Markdown
   file inside the blog `entries/` directory; the media root and the selected
   file are re-checked at that moment. If there is no eligible editor, or the
   media file or root is missing or unsafe, the Media status line reports it and

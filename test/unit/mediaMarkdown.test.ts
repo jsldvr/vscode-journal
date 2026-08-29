@@ -2,6 +2,8 @@ import * as assert from "assert";
 import {
   buildMediaSnippetBody,
   composeMediaTarget,
+  encodeMarkdownDestination,
+  escapeMarkdownLinkText,
   escapeSnippetText,
 } from "../../src/mediaMarkdown";
 
@@ -60,25 +62,55 @@ suite("mediaMarkdown", () => {
     );
   });
 
-  test("dynamic label and target metacharacters are emitted as literal snippet text", () => {
+  test("encodeMarkdownDestination percent-encodes each segment but preserves the slashes", () => {
     assert.strictEqual(
-      buildMediaSnippetBody({
-        isImage: false,
-        label: "wei$rd}na\\me.txt",
-        target: "media/wei$rd}na\\me.txt",
-      }),
-      "[wei\\$rd\\}na\\\\me.txt](media/wei\\$rd\\}na\\\\me.txt)"
+      encodeMarkdownDestination("assets/my uploads/pic 2.png"),
+      "assets/my%20uploads/pic%202.png"
     );
   });
 
-  test("an image target containing snippet metacharacters is escaped", () => {
+  test("encodeMarkdownDestination encodes parentheses, #, ? and % that would break a (...) destination", () => {
+    assert.strictEqual(
+      encodeMarkdownDestination("media/note (1)#draft?.png"),
+      "media/note%20%281%29%23draft%3F.png"
+    );
+  });
+
+  test("escapeMarkdownLinkText backslash-escapes brackets and backslashes only", () => {
+    assert.strictEqual(escapeMarkdownLinkText("a[b].pdf"), "a\\[b\\].pdf");
+    assert.strictEqual(escapeMarkdownLinkText("a(b) c.pdf"), "a(b) c.pdf");
+  });
+
+  test("a common filename with spaces and parentheses still yields a valid image link", () => {
     assert.strictEqual(
       buildMediaSnippetBody({
         isImage: true,
-        label: "x.png",
-        target: "media/a$b/x.png",
+        label: "screen shot (1).png",
+        target: "media/screen shot (1).png",
       }),
-      "![${1:alt text}](media/a\\$b/x.png)"
+      "![${1:alt text}](media/screen%20shot%20%281%29.png)"
+    );
+  });
+
+  test("a non-image label's Markdown brackets are escaped and its destination percent-encoded", () => {
+    assert.strictEqual(
+      buildMediaSnippetBody({
+        isImage: false,
+        label: "a[b].pdf",
+        target: "media/a[b].pdf",
+      }),
+      "[a\\\\[b\\\\].pdf](media/a%5Bb%5D.pdf)"
+    );
+  });
+
+  test("dynamic snippet metacharacters in the label are emitted as literal snippet text", () => {
+    assert.strictEqual(
+      buildMediaSnippetBody({
+        isImage: false,
+        label: "a$b}c.txt",
+        target: "media/a$b}c.txt",
+      }),
+      "[a\\$b\\}c.txt](media/a%24b%7Dc.txt)"
     );
   });
 });
