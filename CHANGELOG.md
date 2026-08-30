@@ -16,10 +16,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the blog directory; an absolute path or one that escapes it (for example
   `../shared`) is refused and the Media section reports an unavailable state
   instead of reading, watching, or writing outside the blog.
-- `Journal: Set Media Directory` command and Media-toolbar folder picker that
-  store the selection as a portable, forward-slash, blog-relative path at
-  Workspace scope. A folder outside the blog directory is rejected and leaves
-  the setting unchanged.
+- `Journal: Set Media Directory` command (Command Palette) that opens a folder
+  picker and stores the selection as a portable, forward-slash, blog-relative
+  path at Workspace scope. A folder outside the blog directory is rejected and
+  leaves the setting unchanged.
 - `Journal: Reveal Media Directory` command (Journal view overflow menu and
   Command Palette) that opens the current media directory in the OS file
   manager. A missing, unsafe, or symlinked directory is reported as an error
