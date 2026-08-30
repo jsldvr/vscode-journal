@@ -2,7 +2,7 @@
   "name": "vscode-journal",
   "displayName": "Journal",
   "description": "A simple blog extension that stores entries in markdown, with a tree view browser and full-text search",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "publisher": "jsldvr",
   "license": "MIT",
   "repository": {
@@ -30,9 +30,11 @@
     "onCommand:vsJournal.openEntry",
     "onCommand:vsJournal.searchByTag",
     "onCommand:vsJournal.setBlogPath",
+    "onCommand:vsJournal.setMediaPath",
     "onCommand:vsJournal.rescanEntries",
     "onCommand:vsJournal.uploadMedia",
     "onCommand:vsJournal.refreshMediaLibrary",
+    "onCommand:vsJournal.revealMediaDirectory",
     "onView:vsJournal.search"
   ],
   "main": "./out/extension.js",
@@ -85,6 +87,12 @@
         "icon": "$(folder)"
       },
       {
+        "command": "vsJournal.setMediaPath",
+        "title": "Set Media Directory",
+        "category": "Journal",
+        "icon": "$(folder)"
+      },
+      {
         "command": "vsJournal.rescanEntries",
         "title": "Rescan All Entries",
         "category": "Journal",
@@ -101,6 +109,11 @@
         "title": "Refresh Media Library",
         "category": "Journal",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "vsJournal.revealMediaDirectory",
+        "title": "Reveal Media Directory",
+        "category": "Journal"
       }
     ],
     "views": {
@@ -138,6 +151,11 @@
           "command": "vsJournal.rescanEntries",
           "when": "view == vsJournal.search",
           "group": "navigation"
+        },
+        {
+          "command": "vsJournal.revealMediaDirectory",
+          "when": "view == vsJournal.search",
+          "group": "1_media"
         }
       ],
       "commandPalette": [
@@ -149,6 +167,9 @@
         },
         {
           "command": "vsJournal.setBlogPath"
+        },
+        {
+          "command": "vsJournal.setMediaPath"
         },
         {
           "command": "vsJournal.openEntry",
@@ -163,6 +184,9 @@
         },
         {
           "command": "vsJournal.refreshMediaLibrary"
+        },
+        {
+          "command": "vsJournal.revealMediaDirectory"
         }
       ]
     },
@@ -173,6 +197,13 @@
           "type": "string",
           "default": "./blog",
           "description": "Path to the blog directory relative to workspace root",
+          "pattern": "^[^<>:\"|?*]+$",
+          "patternErrorMessage": "Invalid path characters. Please use a valid directory path."
+        },
+        "vsJournal.mediaPath": {
+          "type": "string",
+          "default": "media",
+          "description": "Path to the media directory, relative to the configured blog directory. Must stay within the blog directory.",
           "pattern": "^[^<>:\"|?*]+$",
           "patternErrorMessage": "Invalid path characters. Please use a valid directory path."
         }

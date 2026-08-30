@@ -119,6 +119,25 @@ export async function isMediaRootDirectory(mediaRoot: string): Promise<boolean> 
   }
 }
 
+// Whether mediaRoot is safe to hand to the recursive file watcher and
+// the webview's localResourceRoots. Like isMediaRootDirectory but also
+// accepts a not-yet-created root: the media directory is created lazily
+// on first upload, and a watcher bound before it exists is rebound
+// afterwards, so "missing" must not disqualify it. A root that is
+// itself a symlink or otherwise not a real directory is rejected here
+// (statMediaRoot's "unsafe" state) because hasSymlinkedAncestor
+// deliberately never inspects the root itself -- without this check a
+// symlinked media root would be followed straight out of the blog.
+// Never throws: any uncertainty (including a stat failure) fails closed
+// to "not watchable".
+export async function isMediaRootWatchable(mediaRoot: string): Promise<boolean> {
+  try {
+    return (await statMediaRoot(mediaRoot)) !== "unsafe";
+  } catch {
+    return false;
+  }
+}
+
 // Recursively scans mediaRoot for regular files. Symlinks -- whether a
 // symlinked file or a symlinked directory -- are excluded from both
 // traversal and results without being followed: fs.readdir's Dirent

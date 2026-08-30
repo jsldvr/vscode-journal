@@ -15,7 +15,10 @@ A simple blog extension for VS Code that stores entries in markdown format with 
   tools apply
 - **Media Library**: A Media section built into the same Journal sidebar view,
   below the entry browse list, for browsing, uploading, and managing images,
-  audio, video, and other files stored in `media/`
+  audio, video, and other files stored in the media directory (`media/` by
+  default, configurable via `vsJournal.mediaPath`). One click on a tile inserts
+  correctly formatted Markdown for the file at the cursor in the active journal
+  entry.
 
 ## Directory Structure
 
@@ -29,6 +32,7 @@ blog/
 │           └── DD/      # Day folders
 │               └── title.md  # Individual entries
 └── media/                # Images, audio, video, and other files
+                          # (default location; see vsJournal.mediaPath)
 ```
 
 Markdown is the source of truth. Everything under `entries/.vs-journal/` is
@@ -73,9 +77,29 @@ section header between them.
 
 The Journal sidebar view has a Media section below the entry browse list, in
 the same panel and the same webview -- there is still only one contributed
-view in the activity bar. It shows the contents of `<blogPath>/media` (a
-sibling of `entries/`, created automatically the first time you upload a
-file -- it is never created merely by opening the extension).
+view in the activity bar. It shows the contents of the media directory,
+which is `vsJournal.mediaPath` resolved against the configured blog
+directory (default `media`, i.e. a sibling of `entries/`). The directory is
+created automatically the first time you upload a file -- it is never
+created merely by opening the extension, by opening the folder picker, or
+by changing the setting.
+
+The Media heading shows the current location as a workspace-relative path,
+for example `Media: blog/assets` (a long path is truncated with the full
+label on hover). It reflects `vsJournal.blogPath` and `vsJournal.mediaPath`
+and updates whenever either changes; it reads `Media: unavailable` when no
+safe directory can be resolved. A valid but not-yet-created directory still
+shows its configured path -- displaying the path never creates it.
+
+The media directory must stay within the configured blog directory. A
+`vsJournal.mediaPath` value that is absolute or escapes the blog directory
+(for example `../shared`) is refused: the Media section reports an
+unavailable state rather than reading, watching, or writing outside the
+blog. Run `Journal: Set Media Directory` to pick a folder inside the blog
+directory; the selection is stored as a portable, forward-slash
+blog-relative path at Workspace scope (matching `vsJournal.blogPath`), and a
+folder outside the blog directory is rejected with an error that leaves the
+setting unchanged.
 
 - A toolbar (search field, a type filter -- All / Images / Audio / Video /
   Documents/Other -- an Upload button, and a Refresh button) stays pinned to
@@ -83,15 +107,31 @@ file -- it is never created merely by opening the extension).
 - Files render as a responsive thumbnail grid: images show real previews,
   everything else shows a labeled placeholder. Search matches filenames and
   paths case-insensitively; results sort newest-modified first.
-- Clicking (or keyboard-activating) a tile opens its details in an editor-area
-  tab -- preview, filename, `media/<relative-path>`, type, size, and
-  last-modified time, plus Copy Path, Open, Reveal in File Explorer/Finder,
-  and Delete actions -- titled with the filename. Selecting another tile
-  reuses and updates that same tab rather than opening a new one. Delete
-  always asks for confirmation first, only removes the one selected file,
-  and replaces the tab's content with an unavailable state afterward.
-  Nothing is ever selected automatically: opening or refreshing the sidebar,
-  or uploading files, never opens or changes this tab on its own.
+- Each tile has two actions. The primary action -- clicking the thumbnail, or
+  activating it with Enter or Space -- inserts the file as Markdown at every
+  cursor in the active journal entry, without opening or focusing any other
+  tab. An image inserts `![alt text](media/image.png)`; any other file inserts
+  `[file.pdf](media/file.pdf)` using the file's own name as the link label. The
+  `alt text` is a snippet placeholder, already selected so you can type the real
+  text immediately. The link target uses your configured `vsJournal.mediaPath`
+  (so `assets/uploads` produces `assets/uploads/...`), always with forward
+  slashes, and is percent-encoded so names with spaces or parentheses (such as
+  screenshots) still produce a valid link. Insertion only happens when the
+  active editor is a saved Markdown
+  file inside the blog `entries/` directory; the media root and the selected
+  file are re-checked at that moment. If there is no eligible editor, or the
+  media file or root is missing or unsafe, the Media status line reports it and
+  nothing is inserted, created, or opened.
+- The secondary action is a small **Details** button on each tile. It opens the
+  file's details in an editor-area tab -- preview, filename,
+  `media/<relative-path>`, type, size, and last-modified time, plus Copy Path,
+  Open, Reveal in File Explorer/Finder, and Delete actions -- titled with the
+  filename. Choosing Details for another tile reuses and updates that same tab
+  rather than opening a new one. Delete always asks for confirmation first, only
+  removes the one selected file, and replaces the tab's content with an
+  unavailable state afterward. Nothing opens this tab automatically: opening or
+  refreshing the sidebar, uploading files, or inserting media never opens or
+  changes it.
 - Upload opens a multi-select file picker and copies the chosen files into
   `media/`, preserving filenames. A name collision never overwrites an
   existing file -- colliding uploads are renamed with a numeric suffix
@@ -100,7 +140,13 @@ file -- it is never created merely by opening the extension).
   when files are added, changed, deleted, or renamed on disk.
 - `Journal: Upload Media` and `Journal: Refresh Media Library` are available
   from the Command Palette; the same actions are also available as buttons
-  in the Media toolbar itself.
+  in the Media toolbar itself. `Journal: Set Media Directory` opens a folder
+  picker to change `vsJournal.mediaPath`.
+- `Journal: Reveal Media Directory` is in the Journal view toolbar overflow
+  menu (the `...` button) and the Command Palette. It reveals the current
+  media directory in your OS file manager. A missing, unsafe, or symlinked
+  directory is not created or revealed -- the command reports an error
+  instead.
 
 ## Git and the generated index
 
@@ -122,7 +168,12 @@ rule does not untrack them; untrack them manually (for example
 
 ## Configuration
 
-- `vsJournal.blogPath`: Path to blog directory (default: "./blog")
+- `vsJournal.blogPath`: Path to blog directory, relative to the workspace
+  root (default: "./blog")
+- `vsJournal.mediaPath`: Path to the media directory, relative to the
+  configured blog directory (default: "media"). Must stay within the blog
+  directory; absolute or escaping values are ignored. Change it with
+  `Journal: Set Media Directory`.
 
 ## Development
 

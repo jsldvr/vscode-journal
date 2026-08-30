@@ -4,9 +4,24 @@ import * as path from "path";
 import moment = require("moment");
 import { BlogIndex } from "./blogIndex";
 import { SearchViewProvider } from "./searchView";
-import { hasSymlinkedAncestor } from "./mediaLibrary";
+import {
+  hasSymlinkedAncestor,
+  isMediaRootDirectory,
+  isMediaRootWatchable,
+} from "./mediaLibrary";
 import { maybeOfferGitignoreRule } from "./gitignoreGuard";
-import { createUniqueFile, isPathInside } from "./pathUtils";
+import {
+  DEFAULT_MEDIA_PATH,
+  createUniqueFile,
+  isPathInside,
+  resolveContainedMediaDir,
+  toPortableBlogRelativePath,
+  toWorkspaceRelativeDisplayPath,
+} from "./pathUtils";
+
+// Shown in the Media heading and by the reveal command when no safe
+// media target can be resolved.
+const MEDIA_LOCATION_UNAVAILABLE = "unavailable";
 
 let activeHost: IndexHost | undefined;
 
@@ -29,27 +44,118 @@ function resolveBlogDir(): string | undefined {
   return blogDir;
 }
 
-// The media directory is a sibling of entries/, never created merely by
+// Reads the configured (blog-relative) media path, defaulting to
+// DEFAULT_MEDIA_PATH. Kept in one place so the command, resolution, and
+// picker all agree on the fallback.
+function configuredMediaPath(): string {
+  return vscode.workspace
+    .getConfiguration("vsJournal")
+    .get<string>("mediaPath", DEFAULT_MEDIA_PATH);
+}
+
+// The media directory lives inside the configured blog directory (by
+// default the "media" sibling of entries/), never created merely by
 // activation -- only on first upload or another explicit media action.
 // Async: beyond the (synchronous) blog-path containment check shared
-// with entries, media additionally rejects a symlinked ancestor
-// anywhere between the workspace root and the media root -- explicitly
-// scoped to media only, since upload and delete give a symlinked
-// ancestor a way to write or delete outside the blog that entries
-// (read-mostly) does not have. Entry containment is intentionally left
-// unchanged; it has the same latent gap, but fixing it is a separate,
-// pre-existing concern outside this feature's scope.
+// with entries, media resolution additionally (a) requires the
+// configured vsJournal.mediaPath to resolve lexically inside the blog
+// directory -- an absolute or escaping value yields no media directory
+// at all, so an external path never reaches scanning, resource roots,
+// uploads, deletion, or watchers -- (b) rejects a symlinked ancestor
+// anywhere between the workspace root and the media root, and (c)
+// rejects a media root that is itself a symlink (or not a directory).
+// (c) matters here specifically because the watcher and the webview's
+// resource roots consume this path directly and, unlike scan/upload/
+// delete, do not re-check the root -- and hasSymlinkedAncestor
+// deliberately never inspects the root itself. All three checks are
+// explicitly scoped to media only, since upload and delete give an
+// escaping or symlinked path a way to write or delete outside the blog
+// that entries (read-mostly) does not have. Entry containment is
+// intentionally left unchanged; it has the same latent gap, but fixing
+// it is a separate, pre-existing concern outside this feature's scope.
 async function resolveMediaDir(): Promise<string | undefined> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   const blogDir = resolveBlogDir();
   if (!workspaceFolder || !blogDir) {
     return undefined;
   }
-  const mediaDir = path.join(blogDir, "media");
+  const mediaDir = resolveContainedMediaDir(blogDir, configuredMediaPath());
+  if (!mediaDir) {
+    return undefined;
+  }
   if (await hasSymlinkedAncestor(workspaceFolder.uri.fsPath, mediaDir)) {
     return undefined;
   }
+  if (!(await isMediaRootWatchable(mediaDir))) {
+    return undefined;
+  }
   return mediaDir;
+}
+
+// Portable, forward-slash media-directory path relative to the
+// configured blog directory (e.g. "media" or "assets/uploads"),
+// formatted from the exact mediaDir snapshot the caller already
+// resolved via resolveMediaDir() -- never a second configuration read
+// -- so an inserted media link target cannot drift from the scan or
+// resource-root generation. undefined when there is no blog directory
+// or mediaDir is not contained within it, in which case media
+// insertion is refused rather than guessed. Presentation/derivation
+// only: no filesystem access.
+function portableMediaDirPath(mediaDir: string): string | undefined {
+  const blogDir = resolveBlogDir();
+  return blogDir ? toPortableBlogRelativePath(blogDir, mediaDir) : undefined;
+}
+
+// Presentation label for the Media heading, formatted from the exact
+// mediaDir snapshot pushState() already resolved -- never a second
+// configuration read -- so the label cannot drift from the file scan.
+// A resolved directory becomes a portable workspace-relative path
+// (e.g. "blog/assets") whether or not it exists on disk yet; undefined
+// (or a target that somehow escapes the workspace) becomes the
+// unavailable fallback so an absolute filesystem path is never shown.
+function describeMediaLocation(mediaDir: string | undefined): string {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!mediaDir || !workspaceFolder) {
+    return MEDIA_LOCATION_UNAVAILABLE;
+  }
+  return (
+    toWorkspaceRelativeDisplayPath(workspaceFolder.uri.fsPath, mediaDir) ??
+    MEDIA_LOCATION_UNAVAILABLE
+  );
+}
+
+// Reveals the current media directory in the OS file manager. The
+// target is resolved fresh through resolveMediaDir() at invocation --
+// never a cached path, since configuration or an ancestor's symlink
+// status may have changed since the heading was last drawn -- and is
+// revealed only when it currently exists as a real (non-symlinked)
+// directory. A missing (not-yet-created), unsafe, or unresolvable
+// target reports an error and reveals nothing. Nothing here creates
+// the directory or falls back to an ancestor.
+async function revealMediaDirectory(): Promise<void> {
+  try {
+    const mediaDir = await resolveMediaDir();
+    if (!mediaDir) {
+      vscode.window.showErrorMessage(
+        "No safe media directory is available. Check vsJournal.blogPath and vsJournal.mediaPath."
+      );
+      return;
+    }
+    if (!(await isMediaRootDirectory(mediaDir))) {
+      vscode.window.showErrorMessage(
+        "The media directory does not exist yet. Upload a media file to create it."
+      );
+      return;
+    }
+    await vscode.commands.executeCommand(
+      "revealFileInOS",
+      vscode.Uri.file(mediaDir)
+    );
+  } catch (error) {
+    vscode.window.showErrorMessage(
+      `Failed to reveal media directory: ${error}`
+    );
+  }
 }
 
 // Owns the lifecycle of the SQLite index for the configured journal:
@@ -150,6 +256,9 @@ export function activate(context: vscode.ExtensionContext) {
     },
     {
       getMediaDir: () => resolveMediaDir(),
+      describeMediaLocation: (mediaDir) => describeMediaLocation(mediaDir),
+      toPortableMediaDir: (mediaDir) => portableMediaDirPath(mediaDir),
+      getEntriesDir: () => host.entriesDir(),
       onMediaDirEnsured: () => void rebindMediaWatcher(),
     }
   );
@@ -191,16 +300,29 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   let mediaWatcherDisposable: vscode.Disposable | undefined;
+  let mediaWatcherGeneration = 0;
 
   // Rebinding is safe to call repeatedly: dispose+recreate. Called on
-  // activation, on a blogPath change, and after an upload that just
-  // created media/ on demand -- a watcher bound before the directory
-  // existed may never have started watching it.
+  // activation, on a blogPath change, on a mediaPath change, and after
+  // an upload that just created the media directory on demand -- a
+  // watcher bound before the directory existed may never have started
+  // watching it. createMediaWatcher() is async, so two rebinds can be
+  // in flight at once (e.g. two quick mediaPath edits); a generation
+  // token ensures only the newest call's watcher is retained and any
+  // watcher produced by a superseded call is disposed rather than left
+  // bound to a stale directory.
   async function rebindMediaWatcher(): Promise<void> {
+    const generation = ++mediaWatcherGeneration;
     mediaWatcherDisposable?.dispose();
-    mediaWatcherDisposable = await createMediaWatcher(refreshMediaView);
-    if (mediaWatcherDisposable) {
-      context.subscriptions.push(mediaWatcherDisposable);
+    mediaWatcherDisposable = undefined;
+    const next = await createMediaWatcher(refreshMediaView);
+    if (generation !== mediaWatcherGeneration) {
+      next?.dispose();
+      return;
+    }
+    mediaWatcherDisposable = next;
+    if (next) {
+      context.subscriptions.push(next);
     }
   }
 
@@ -269,6 +391,13 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  const setMediaPathCommand = vscode.commands.registerCommand(
+    "vsJournal.setMediaPath",
+    async () => {
+      await setMediaPath();
+    }
+  );
+
   const rescanCommand = vscode.commands.registerCommand(
     "vsJournal.rescanEntries",
     async () => {
@@ -301,6 +430,13 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  const revealMediaDirectoryCommand = vscode.commands.registerCommand(
+    "vsJournal.revealMediaDirectory",
+    async () => {
+      await revealMediaDirectory();
+    }
+  );
+
   context.subscriptions.push(
     newEntryCommand,
     openBlogCommand,
@@ -310,15 +446,21 @@ export function activate(context: vscode.ExtensionContext) {
     openEntryCommand,
     searchByTagCommand,
     setBlogPathCommand,
+    setMediaPathCommand,
     rescanCommand,
     uploadMediaCommand,
-    refreshMediaLibraryCommand
+    refreshMediaLibraryCommand,
+    revealMediaDirectoryCommand
   );
 
   const configChangeListener = vscode.workspace.onDidChangeConfiguration(
     (e) => {
       if (e.affectsConfiguration("vsJournal.blogPath")) {
+        // A blogPath change already replaces the media root too, so it
+        // is handled entirely by handleBlogPathChange.
         void handleBlogPathChange();
+      } else if (e.affectsConfiguration("vsJournal.mediaPath")) {
+        void handleMediaPathChange();
       }
     }
   );
@@ -333,6 +475,14 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.showInformationMessage(
       "Blog directory path updated. Views refreshed."
     );
+  }
+
+  // A mediaPath change only moves the media root: rebind the media
+  // watcher and refresh the media view. The entry index, its watcher,
+  // and the browse list are deliberately left untouched.
+  async function handleMediaPathChange() {
+    await rebindMediaWatcher();
+    refreshMediaView();
   }
 
   context.subscriptions.push(configChangeListener);
@@ -480,6 +630,63 @@ async function setBlogPath() {
     );
   } catch (error) {
     vscode.window.showErrorMessage(`Failed to set blog path: ${error}`);
+  }
+}
+
+// Folder-picker command for vsJournal.mediaPath. Selection is confined
+// to the configured blog directory: the picker opens at the current
+// valid media directory (or the blog directory), and a pick outside the
+// blog is rejected with an error and leaves configuration unchanged.
+// A valid pick is stored as a portable, forward-slash blog-relative
+// path at Workspace scope, matching vsJournal.blogPath. Nothing here
+// creates a directory -- the folder picker only selects an existing one.
+async function setMediaPath() {
+  try {
+    const blogDir = resolveBlogDir();
+    if (!blogDir) {
+      vscode.window.showErrorMessage(
+        "No blog directory found. Set the blog directory first."
+      );
+      return;
+    }
+
+    const currentMediaDir = await resolveMediaDir();
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      defaultUri: vscode.Uri.file(currentMediaDir ?? blogDir),
+      openLabel: "Set Media Directory",
+      title: "Select a media directory inside the blog directory",
+    });
+
+    if (!picked || picked.length === 0) {
+      return; // User cancelled -- leave configuration unchanged.
+    }
+
+    const relativePath = toPortableBlogRelativePath(blogDir, picked[0].fsPath);
+    if (!relativePath) {
+      vscode.window.showErrorMessage(
+        "The media directory must be inside the configured blog directory."
+      );
+      return;
+    }
+
+    // The onDidChangeConfiguration listener rebinds the media watcher
+    // and refreshes the media view for the new location.
+    await vscode.workspace
+      .getConfiguration("vsJournal")
+      .update(
+        "mediaPath",
+        relativePath,
+        vscode.ConfigurationTarget.Workspace
+      );
+
+    vscode.window.showInformationMessage(
+      `Media directory updated to: ${relativePath}`
+    );
+  } catch (error) {
+    vscode.window.showErrorMessage(`Failed to set media directory: ${error}`);
   }
 }
 

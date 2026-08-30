@@ -7,6 +7,56 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-29
+
+### Added
+
+- `vsJournal.mediaPath` setting (default `media`) that resolves the media
+  directory against the configured blog directory. The value must stay inside
+  the blog directory; an absolute path or one that escapes it (for example
+  `../shared`) is refused and the Media section reports an unavailable state
+  instead of reading, watching, or writing outside the blog.
+- `Journal: Set Media Directory` command (Command Palette) that opens a folder
+  picker and stores the selection as a portable, forward-slash, blog-relative
+  path at Workspace scope. A folder outside the blog directory is rejected and
+  leaves the setting unchanged.
+- `Journal: Reveal Media Directory` command (Journal view overflow menu and
+  Command Palette) that opens the current media directory in the OS file
+  manager. A missing, unsafe, or symlinked directory is reported as an error
+  and is neither created nor revealed.
+- A workspace-relative media location on the Media heading (for example
+  `Media: blog/assets`), truncated with the full label on hover, that reflects
+  `vsJournal.blogPath` and `vsJournal.mediaPath`, updates when either changes,
+  and reads `Media: unavailable` when no safe directory resolves. Showing the
+  path never creates the directory.
+- One-click insertion of a media file as Markdown at every cursor in the
+  active journal entry. An image inserts `![alt text](media/image.png)` with
+  `alt text` as a pre-selected, editable snippet placeholder; any other file
+  inserts `[file.pdf](media/file.pdf)` using the file name as the link label.
+- Markdown link targets composed from the configured `vsJournal.mediaPath`,
+  always forward-slashed and percent-encoded per path segment (including `(`
+  and `)`), with non-image link labels Markdown-escaped, so filenames or
+  configured paths containing spaces, parentheses, or brackets still produce
+  valid links.
+
+### Changed
+
+- The primary media-tile action (click, Enter, or Space) now inserts Markdown
+  into the active entry instead of opening the details tab. Insertion requires
+  the active editor to be a saved Markdown file inside the blog `entries/`
+  directory, and the media root and selected file are re-validated at that
+  moment; when nothing is eligible or the target is unsafe, the Media status
+  line reports it and nothing is inserted, created, or opened.
+- Opening a media file's details moved to a secondary **Details** button on
+  each tile. It still reuses a single editor-area tab and is never opened
+  automatically by sidebar refreshes, uploads, or media insertion.
+- The media watcher, webview resource roots, and Media view now rebind at
+  runtime when `vsJournal.blogPath` or `vsJournal.mediaPath` changes.
+- Lazy creation (the directory is created only on first upload), blog-directory
+  containment, path-traversal rejection, symlinked-root and symlinked-ancestor
+  handling, and webview resource-root protections now cover the configurable
+  media path.
+
 ## [1.2.1] - 2026-08-23
 
 ### Added

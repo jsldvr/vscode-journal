@@ -236,6 +236,9 @@ suite("Media Library", function () {
         getMediaDir: async () => {
           throw new Error("boom");
         },
+        describeMediaLocation: () => "blog/media",
+        toPortableMediaDir: () => "media",
+        getEntriesDir: () => undefined,
         onMediaDirEnsured: () => undefined,
         requestFullRefresh: async () => undefined,
       },
@@ -257,6 +260,9 @@ suite("Media Library", function () {
     const controller = new MediaController(
       {
         getMediaDir: async () => undefined,
+        describeMediaLocation: () => "unavailable",
+        toPortableMediaDir: () => "media",
+        getEntriesDir: () => undefined,
         onMediaDirEnsured: () => undefined,
         requestFullRefresh: async () => undefined,
       },
@@ -285,6 +291,437 @@ suite("Media Library", function () {
     }
   }
 
+  async function withStubbedOpenDialog<T>(
+    result: vscode.Uri[] | undefined,
+    run: () => Promise<T>
+  ): Promise<T> {
+    const original = vscode.window.showOpenDialog;
+    (vscode.window as unknown as { showOpenDialog: unknown }).showOpenDialog =
+      async () => result;
+    try {
+      return await run();
+    } finally {
+      (vscode.window as unknown as { showOpenDialog: unknown }).showOpenDialog =
+        original;
+    }
+  }
+
+  async function withCapturedErrorMessages<T>(
+    run: (messages: string[]) => Promise<T>
+  ): Promise<T> {
+    const original = vscode.window.showErrorMessage;
+    const messages: string[] = [];
+    (vscode.window as unknown as { showErrorMessage: unknown }).showErrorMessage =
+      async (message: string) => {
+        messages.push(message);
+        return undefined;
+      };
+    try {
+      return await run(messages);
+    } finally {
+      (vscode.window as unknown as { showErrorMessage: unknown }).showErrorMessage =
+        original;
+    }
+  }
+
+  async function resetMediaPath(): Promise<void> {
+    await vscode.workspace
+      .getConfiguration("vsJournal")
+      .update("mediaPath", undefined, vscode.ConfigurationTarget.Workspace);
+  }
+
+  interface CapturedCommand {
+    command: string;
+    args: unknown[];
+  }
+
+  // Captures vscode.commands.executeCommand calls (so revealFileInOS
+  // never actually opens the OS file manager during the run) while
+  // still delegating every other command to the real implementation,
+  // and always restores the original in finally.
+  async function withCapturedExecuteCommand<T>(
+    run: (calls: CapturedCommand[]) => Promise<T>
+  ): Promise<T> {
+    const original = vscode.commands.executeCommand;
+    const calls: CapturedCommand[] = [];
+    (vscode.commands as unknown as { executeCommand: unknown }).executeCommand =
+      async (command: string, ...args: unknown[]) => {
+        calls.push({ command, args });
+        if (command === "revealFileInOS") {
+          return undefined;
+        }
+        return (
+          original as (command: string, ...rest: unknown[]) => Thenable<unknown>
+        ).call(vscode.commands, command, ...args);
+      };
+    try {
+      return await run(calls);
+    } finally {
+      (vscode.commands as unknown as { executeCommand: unknown }).executeCommand =
+        original;
+    }
+  }
+
+  function revealedPaths(calls: CapturedCommand[]): string[] {
+    return calls
+      .filter((call) => call.command === "revealFileInOS")
+      .map((call) => (call.args[0] as vscode.Uri).fsPath);
+  }
+
+  test("vsJournal.revealMediaDirectory is registered and contributed to the view/title overflow (non-navigation group)", async () => {
+    await activateExtension();
+    const commands = await vscode.commands.getCommands(true);
+    assert.ok(commands.includes("vsJournal.revealMediaDirectory"));
+
+    const extension = vscode.extensions.getExtension("jsldvr.vscode-journal");
+    assert.ok(extension);
+    const viewTitle: Array<{ command: string; when?: string; group?: string }> =
+      extension.packageJSON.contributes.menus["view/title"];
+    const entry = viewTitle.find(
+      (item) => item.command === "vsJournal.revealMediaDirectory"
+    );
+    assert.ok(entry, "reveal command must be contributed to view/title");
+    assert.strictEqual(entry.when, "view == vsJournal.search");
+    assert.ok(
+      entry.group && !entry.group.startsWith("navigation"),
+      "a non-navigation group keeps the command in the native overflow, not the title bar"
+    );
+  });
+
+  test("MediaController outbound state carries the location label for populated, empty, missing, and disabled states", async () => {
+    const emptyRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "vs-journal-media-loc-")
+    );
+    try {
+      const posts: Record<string, unknown>[] = [];
+      const controller = new MediaController(
+        {
+          getMediaDir: async () => emptyRoot,
+          describeMediaLocation: () => "blog/assets",
+          toPortableMediaDir: () => "assets",
+          getEntriesDir: () => undefined,
+          onMediaDirEnsured: () => undefined,
+          requestFullRefresh: async () => undefined,
+        },
+        (message) => posts.push(message)
+      );
+      await controller.pushState();
+      const filesMessage = posts.find((m) => m.type === "mediaFiles");
+      assert.ok(filesMessage, "a real media root pushes mediaFiles");
+      assert.strictEqual(filesMessage.location, "blog/assets");
+      assert.deepStrictEqual(filesMessage.files, []);
+    } finally {
+      await fs.remove(emptyRoot);
+    }
+
+    // A valid but not-yet-created media directory still reports its label.
+    const missingRoot = path.join(
+      os.tmpdir(),
+      `vs-journal-media-missing-${Date.now()}`
+    );
+    const missingPosts: Record<string, unknown>[] = [];
+    const missingController = new MediaController(
+      {
+        getMediaDir: async () => missingRoot,
+        describeMediaLocation: () => "blog/assets",
+        toPortableMediaDir: () => "assets",
+        getEntriesDir: () => undefined,
+        onMediaDirEnsured: () => undefined,
+        requestFullRefresh: async () => undefined,
+      },
+      (message) => missingPosts.push(message)
+    );
+    await missingController.pushState();
+    const missingMessage = missingPosts.find((m) => m.type === "mediaFiles");
+    assert.ok(missingMessage);
+    assert.strictEqual(missingMessage.location, "blog/assets");
+    assert.strictEqual(
+      await fs.pathExists(missingRoot),
+      false,
+      "resolving a display label must not create the directory"
+    );
+
+    // A disabled (unsafe / no workspace) state still carries a label so
+    // the heading never goes stale.
+    const disabledPosts: Record<string, unknown>[] = [];
+    const disabledController = new MediaController(
+      {
+        getMediaDir: async () => undefined,
+        describeMediaLocation: () => "unavailable",
+        toPortableMediaDir: () => "media",
+        getEntriesDir: () => undefined,
+        onMediaDirEnsured: () => undefined,
+        requestFullRefresh: async () => undefined,
+      },
+      (message) => disabledPosts.push(message)
+    );
+    await disabledController.pushState();
+    const disabledMessage = disabledPosts.find((m) => m.type === "mediaDisabled");
+    assert.ok(disabledMessage);
+    assert.strictEqual(disabledMessage.location, "unavailable");
+  });
+
+  test("revealMediaDirectory reveals the resolved current media directory when it exists", async () => {
+    await activateExtension();
+    const mediaDir = path.join(workspaceRoot(), "blog", "media");
+    await fs.ensureDir(mediaDir);
+    try {
+      const calls = await withCapturedExecuteCommand(async (captured) => {
+        await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+        return captured;
+      });
+      assert.deepStrictEqual(revealedPaths(calls), [mediaDir]);
+    } finally {
+      await fs.remove(mediaDir);
+    }
+  });
+
+  test("changing vsJournal.mediaPath changes the reveal target", async () => {
+    await activateExtension();
+    const altDir = path.join(workspaceRoot(), "blog", "media-alt");
+    await fs.ensureDir(altDir);
+    try {
+      await vscode.workspace
+        .getConfiguration("vsJournal")
+        .update("mediaPath", "media-alt", vscode.ConfigurationTarget.Workspace);
+      const calls = await withCapturedExecuteCommand(async (captured) => {
+        await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+        return captured;
+      });
+      assert.deepStrictEqual(revealedPaths(calls), [altDir]);
+    } finally {
+      await resetMediaPath();
+      await fs.remove(altDir);
+    }
+  });
+
+  test("revealMediaDirectory reports an error and reveals nothing when the media directory does not exist", async () => {
+    await activateExtension();
+    const mediaDir = path.join(workspaceRoot(), "blog", "media");
+    await fs.remove(mediaDir);
+    const errors = await withCapturedErrorMessages((messages) =>
+      withCapturedExecuteCommand(async (calls) => {
+        await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+        assert.deepStrictEqual(
+          revealedPaths(calls),
+          [],
+          "a missing media directory must not be revealed"
+        );
+        return messages;
+      })
+    );
+    assert.ok(
+      errors.some((message) => message.includes("does not exist")),
+      "a missing media directory must report a clear error"
+    );
+    assert.strictEqual(
+      await fs.pathExists(mediaDir),
+      false,
+      "the reveal command must never create the media directory"
+    );
+  });
+
+  test("revealMediaDirectory reports an error and reveals nothing when the media root is a plain file", async () => {
+    await activateExtension();
+    const mediaPath = path.join(workspaceRoot(), "blog", "media");
+    await fs.remove(mediaPath);
+    await fs.ensureDir(path.dirname(mediaPath));
+    await fs.writeFile(mediaPath, "not a directory");
+    try {
+      const errors = await withCapturedErrorMessages((messages) =>
+        withCapturedExecuteCommand(async (calls) => {
+          await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+          assert.deepStrictEqual(revealedPaths(calls), []);
+          return messages;
+        })
+      );
+      assert.ok(errors.length > 0, "a non-directory media root must report an error");
+    } finally {
+      await fs.remove(mediaPath);
+    }
+  });
+
+  test("revealMediaDirectory reports an error and reveals nothing when the media root is a symlink", async () => {
+    await activateExtension();
+    const linkPath = path.join(workspaceRoot(), "blog", "media-link");
+    const outsideDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "vs-journal-reveal-link-target-")
+    );
+    try {
+      const created = await trySymlinkDir(outsideDir, linkPath);
+      if (!created) {
+        return; // No symlink/junction support here; nothing to assert.
+      }
+      await vscode.workspace
+        .getConfiguration("vsJournal")
+        .update("mediaPath", "media-link", vscode.ConfigurationTarget.Workspace);
+      const errors = await withCapturedErrorMessages((messages) =>
+        withCapturedExecuteCommand(async (calls) => {
+          await vscode.commands.executeCommand("vsJournal.revealMediaDirectory");
+          assert.deepStrictEqual(revealedPaths(calls), []);
+          return messages;
+        })
+      );
+      assert.ok(
+        errors.length > 0,
+        "a symlinked media root must report an error, not be revealed"
+      );
+    } finally {
+      await resetMediaPath();
+      await fs.remove(linkPath);
+      await fs.remove(outsideDir);
+    }
+  });
+
+  // Directory junctions are unprivileged on Windows (unlike file
+  // symlinks); still, fall back to skipping if the platform refuses.
+  async function trySymlinkDir(target: string, linkPath: string): Promise<boolean> {
+    try {
+      await fs.symlink(target, linkPath, "junction");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  test("vsJournal.setMediaPath is registered and vsJournal.mediaPath defaults to media", async () => {
+    await activateExtension();
+    const commands = await vscode.commands.getCommands(true);
+    assert.ok(commands.includes("vsJournal.setMediaPath"));
+    assert.strictEqual(
+      vscode.workspace.getConfiguration("vsJournal").get<string>("mediaPath"),
+      "media"
+    );
+  });
+
+  test("setMediaPath stores a portable, blog-relative path for a folder selected inside the blog", async () => {
+    await activateExtension();
+    const selectedDir = path.join(workspaceRoot(), "blog", "assets", "pics");
+    await fs.ensureDir(selectedDir);
+    try {
+      await withStubbedOpenDialog([vscode.Uri.file(selectedDir)], () =>
+        Promise.resolve(
+          vscode.commands.executeCommand("vsJournal.setMediaPath")
+        )
+      );
+      assert.strictEqual(
+        vscode.workspace
+          .getConfiguration("vsJournal")
+          .get<string>("mediaPath"),
+        "assets/pics"
+      );
+    } finally {
+      await resetMediaPath();
+      await fs.remove(path.join(workspaceRoot(), "blog", "assets"));
+    }
+  });
+
+  test("setMediaPath rejects a folder outside the blog directory and leaves configuration unchanged", async () => {
+    await activateExtension();
+    const before = vscode.workspace
+      .getConfiguration("vsJournal")
+      .get<string>("mediaPath");
+    const outsideDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "vs-journal-outside-")
+    );
+    try {
+      const errors = await withCapturedErrorMessages((messages) =>
+        withStubbedOpenDialog([vscode.Uri.file(outsideDir)], async () => {
+          await vscode.commands.executeCommand("vsJournal.setMediaPath");
+          return messages;
+        })
+      );
+      assert.ok(
+        errors.some((message) => message.includes("must be inside")),
+        "an outside selection must report an error"
+      );
+      assert.strictEqual(
+        vscode.workspace
+          .getConfiguration("vsJournal")
+          .get<string>("mediaPath"),
+        before,
+        "configuration must be unchanged after a rejected selection"
+      );
+    } finally {
+      await fs.remove(outsideDir);
+    }
+  });
+
+  test("setMediaPath leaves configuration unchanged when the picker is cancelled", async () => {
+    await activateExtension();
+    const before = vscode.workspace
+      .getConfiguration("vsJournal")
+      .get<string>("mediaPath");
+    await withStubbedOpenDialog(undefined, () =>
+      Promise.resolve(vscode.commands.executeCommand("vsJournal.setMediaPath"))
+    );
+    assert.strictEqual(
+      vscode.workspace.getConfiguration("vsJournal").get<string>("mediaPath"),
+      before
+    );
+  });
+
+  test("a vsJournal.mediaPath that points at a symlinked directory yields no media directory (watcher/resource-root containment)", async () => {
+    await activateExtension();
+    const linkPath = path.join(workspaceRoot(), "blog", "media-link");
+    const outsideDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "vs-journal-media-link-target-")
+    );
+    try {
+      const created = await trySymlinkDir(outsideDir, linkPath);
+      if (!created) {
+        return; // No symlink/junction support here; nothing to assert.
+      }
+      await vscode.workspace
+        .getConfiguration("vsJournal")
+        .update(
+          "mediaPath",
+          "media-link",
+          vscode.ConfigurationTarget.Workspace
+        );
+
+      // upload() resolves the media directory before opening its file
+      // picker and reports an error when it is unavailable/unsafe. A
+      // lexically-contained but symlinked root must land here rather
+      // than being accepted.
+      const errors = await withCapturedErrorMessages((messages) =>
+        withStubbedOpenDialog(undefined, async () => {
+          await vscode.commands.executeCommand("vsJournal.uploadMedia");
+          return messages;
+        })
+      );
+      assert.ok(
+        errors.some((message) => message.includes("unsafe")),
+        "a symlinked media root must be reported as unsafe, not accepted"
+      );
+    } finally {
+      await resetMediaPath();
+      await fs.remove(linkPath);
+      await fs.remove(outsideDir);
+    }
+  });
+
+  test("the media library stays functional after vsJournal.mediaPath changes, without creating the new directory", async () => {
+    await activateExtension();
+    try {
+      await vscode.workspace
+        .getConfiguration("vsJournal")
+        .update(
+          "mediaPath",
+          "media-alt",
+          vscode.ConfigurationTarget.Workspace
+        );
+      await vscode.commands.executeCommand("vsJournal.refreshMediaLibrary");
+      assert.strictEqual(
+        await fs.pathExists(path.join(workspaceRoot(), "blog", "media-alt")),
+        false,
+        "changing mediaPath must not scaffold the new media directory"
+      );
+    } finally {
+      await resetMediaPath();
+    }
+  });
+
   test("delete aborts instead of removing a same-named file from a different blog root if the media root changes while the confirmation modal is open (cross-root-delete regression)", async () => {
     const rootA = await fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-media-a-"));
     const rootB = await fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-media-b-"));
@@ -299,6 +736,9 @@ suite("Media Library", function () {
       const controller = new MediaController(
         {
           getMediaDir: async () => (calls++ === 0 ? rootA : rootB),
+          describeMediaLocation: () => "blog/media",
+          toPortableMediaDir: () => "media",
+          getEntriesDir: () => undefined,
           onMediaDirEnsured: () => undefined,
           requestFullRefresh: async () => undefined,
         },
@@ -328,6 +768,361 @@ suite("Media Library", function () {
     } finally {
       await fs.remove(rootA);
       await fs.remove(rootB);
+    }
+  });
+});
+
+suite("Media Insertion", function () {
+  this.timeout(30000);
+
+  function entriesDir(): string {
+    return path.join(workspaceRoot(), "blog", "entries");
+  }
+
+  interface InsertDepsOverrides {
+    mediaDir?: string | undefined;
+    portableMediaDir?: string | undefined;
+    entries?: string | undefined;
+  }
+
+  function makeController(
+    posts: Record<string, unknown>[],
+    overrides: InsertDepsOverrides
+  ): MediaController {
+    return new MediaController(
+      {
+        getMediaDir: async () => overrides.mediaDir,
+        describeMediaLocation: () => "blog/media",
+        toPortableMediaDir: () =>
+          "portableMediaDir" in overrides ? overrides.portableMediaDir : "media",
+        getEntriesDir: () =>
+          "entries" in overrides ? overrides.entries : entriesDir(),
+        onMediaDirEnsured: () => undefined,
+        requestFullRefresh: async () => undefined,
+      },
+      (message) => posts.push(message)
+    );
+  }
+
+  async function makeMediaRoot(files: string[]): Promise<string> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-insert-media-"));
+    for (const name of files) {
+      await fs.writeFile(path.join(root, name), "bytes");
+    }
+    return root;
+  }
+
+  // Opens a real file inside blog/entries/ as the active editor, runs
+  // the body, then reverts and deletes it so the entry index and other
+  // tests are unaffected.
+  async function withActiveEntry<T>(
+    relativeName: string,
+    contents: string,
+    run: (editor: vscode.TextEditor, filePath: string) => Promise<T>
+  ): Promise<T> {
+    const filePath = path.join(entriesDir(), relativeName);
+    await fs.ensureDir(path.dirname(filePath));
+    await fs.writeFile(filePath, contents);
+    try {
+      const document = await vscode.workspace.openTextDocument(filePath);
+      const editor = await vscode.window.showTextDocument(document);
+      return await run(editor, filePath);
+    } finally {
+      await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+      await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+      await fs.remove(filePath);
+    }
+  }
+
+  function mediaDetailsTabCount(): number {
+    return vscode.window.tabGroups.all
+      .flatMap((group) => group.tabs)
+      .filter(
+        (tab) =>
+          tab.input instanceof vscode.TabInputWebview &&
+          tab.input.viewType.includes("mediaDetails")
+      ).length;
+  }
+
+  function lastStatus(posts: Record<string, unknown>[]): Record<string, unknown> | undefined {
+    return [...posts].reverse().find((message) => message.type === "mediaStatus");
+  }
+
+  teardown(async () => {
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+  });
+
+  test("mediaInsert writes image Markdown at the cursor in an active journal entry without opening a details tab", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["pic.png"]);
+    try {
+      await withActiveEntry("2026/08/29/insert-image.md", "# Entry\n\n", async (editor) => {
+        editor.selection = new vscode.Selection(2, 0, 2, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, { mediaDir: root });
+
+        await controller.dispatch({ type: "mediaInsert", path: "pic.png" });
+
+        assert.ok(
+          editor.document.getText().includes("![alt text](media/pic.png)"),
+          "the active entry must contain the image Markdown"
+        );
+        assert.strictEqual(mediaDetailsTabCount(), 0, "no details tab must open");
+        const status = lastStatus(posts);
+        assert.ok(status, "a status message must be sent");
+        assert.notStrictEqual(status.isError, true, "success feedback, not an error");
+      });
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
+  test("mediaInsert writes a [basename](target) link for a non-image file", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["notes.pdf"]);
+    try {
+      await withActiveEntry("2026/08/29/insert-doc.md", "# Entry\n\n", async (editor) => {
+        editor.selection = new vscode.Selection(2, 0, 2, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, { mediaDir: root });
+
+        await controller.dispatch({ type: "mediaInsert", path: "notes.pdf" });
+
+        assert.ok(
+          editor.document.getText().includes("[notes.pdf](media/notes.pdf)"),
+          "the active entry must contain the non-image link"
+        );
+      });
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
+  test("a configured nested media directory produces an equivalent portable target", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["diagram.png"]);
+    try {
+      await withActiveEntry("2026/08/29/insert-nested.md", "# Entry\n\n", async (editor) => {
+        editor.selection = new vscode.Selection(2, 0, 2, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, {
+          mediaDir: root,
+          portableMediaDir: "assets/uploads",
+        });
+
+        await controller.dispatch({ type: "mediaInsert", path: "diagram.png" });
+
+        assert.ok(
+          editor.document.getText().includes("![alt text](assets/uploads/diagram.png)"),
+          "the target must use the configured nested media path"
+        );
+      });
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
+  test("a filename with spaces and parentheses is percent-encoded into a valid link", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["screen shot (1).png"]);
+    try {
+      await withActiveEntry("2026/08/29/insert-encoded.md", "# Entry\n\n", async (editor) => {
+        editor.selection = new vscode.Selection(2, 0, 2, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, { mediaDir: root });
+
+        await controller.dispatch({
+          type: "mediaInsert",
+          path: "screen shot (1).png",
+        });
+
+        assert.ok(
+          editor.document
+            .getText()
+            .includes("![alt text](media/screen%20shot%20%281%29.png)"),
+          "spaces and parentheses in the destination must be percent-encoded"
+        );
+        assert.notStrictEqual(lastStatus(posts)?.isError, true, "insertion must succeed");
+      });
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
+  test("the image alt-text placeholder is selected for immediate replacement", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["pic.png"]);
+    try {
+      await withActiveEntry("2026/08/29/insert-placeholder.md", "# Entry\n\n", async (editor) => {
+        editor.selection = new vscode.Selection(2, 0, 2, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, { mediaDir: root });
+
+        await controller.dispatch({ type: "mediaInsert", path: "pic.png" });
+
+        assert.strictEqual(
+          editor.document.getText(editor.selection),
+          "alt text",
+          "the alt-text placeholder must be selected after insertion"
+        );
+      });
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
+  test("insertion is applied at every active selection", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["pic.png"]);
+    try {
+      await withActiveEntry(
+        "2026/08/29/insert-multi.md",
+        "line one\nline two\nline three\n",
+        async (editor) => {
+          editor.selections = [
+            new vscode.Selection(0, 0, 0, 0),
+            new vscode.Selection(2, 0, 2, 0),
+          ];
+          const posts: Record<string, unknown>[] = [];
+          const controller = makeController(posts, { mediaDir: root });
+
+          await controller.dispatch({ type: "mediaInsert", path: "pic.png" });
+
+          const occurrences = editor.document
+            .getText()
+            .split("![alt text](media/pic.png)").length - 1;
+          assert.strictEqual(occurrences, 2, "both cursors must receive the insertion");
+        }
+      );
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
+  test("no active editor: mediaInsert reports an error and creates nothing", async () => {
+    await activateExtension();
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    const root = await makeMediaRoot(["pic.png"]);
+    try {
+      const posts: Record<string, unknown>[] = [];
+      const controller = makeController(posts, { mediaDir: root });
+
+      await controller.dispatch({ type: "mediaInsert", path: "pic.png" });
+
+      const status = lastStatus(posts);
+      assert.ok(status, "a status message must be sent");
+      assert.strictEqual(status.isError, true, "no active editor must be an error");
+      assert.strictEqual(mediaDetailsTabCount(), 0, "no details tab must open");
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
+  test("a non-Markdown active editor is rejected without changing the document", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["pic.png"]);
+    try {
+      await withActiveEntry("2026/08/29/insert-plain.txt", "plain text\n", async (editor) => {
+        editor.selection = new vscode.Selection(0, 0, 0, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, { mediaDir: root });
+
+        await controller.dispatch({ type: "mediaInsert", path: "pic.png" });
+
+        assert.strictEqual(editor.document.getText(), "plain text\n", "document must be unchanged");
+        assert.strictEqual(lastStatus(posts)?.isError, true, "must report an error");
+      });
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
+  test("a Markdown editor outside the configured entries directory is rejected", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["pic.png"]);
+    const outside = path.join(workspaceRoot(), "blog", "outside-entry.md");
+    await fs.writeFile(outside, "# Outside\n\n");
+    try {
+      const document = await vscode.workspace.openTextDocument(outside);
+      const editor = await vscode.window.showTextDocument(document);
+      editor.selection = new vscode.Selection(2, 0, 2, 0);
+      const posts: Record<string, unknown>[] = [];
+      const controller = makeController(posts, { mediaDir: root });
+
+      await controller.dispatch({ type: "mediaInsert", path: "pic.png" });
+
+      assert.strictEqual(editor.document.getText(), "# Outside\n\n", "document must be unchanged");
+      assert.strictEqual(lastStatus(posts)?.isError, true, "must report an error");
+    } finally {
+      await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+      await fs.remove(outside);
+    }
+  });
+
+  test("a missing/stale media file is rejected: error, no document change, no file or directory creation, no details tab", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot([]);
+    try {
+      await withActiveEntry("2026/08/29/insert-stale.md", "# Entry\n\n", async (editor) => {
+        editor.selection = new vscode.Selection(2, 0, 2, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, { mediaDir: root });
+
+        await controller.dispatch({ type: "mediaInsert", path: "ghost.png" });
+
+        assert.strictEqual(editor.document.getText(), "# Entry\n\n", "document must be unchanged");
+        assert.strictEqual(lastStatus(posts)?.isError, true, "must report an error");
+        assert.strictEqual(
+          await fs.pathExists(path.join(root, "ghost.png")),
+          false,
+          "the missing media file must not be created"
+        );
+        assert.strictEqual(mediaDetailsTabCount(), 0, "no details tab must open");
+      });
+    } finally {
+      await fs.remove(root);
+    }
+  });
+
+  test("an unresolvable media root is rejected without changing the document", async () => {
+    await activateExtension();
+    try {
+      await withActiveEntry("2026/08/29/insert-noroot.md", "# Entry\n\n", async (editor) => {
+        editor.selection = new vscode.Selection(2, 0, 2, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, { mediaDir: undefined });
+
+        await controller.dispatch({ type: "mediaInsert", path: "pic.png" });
+
+        assert.strictEqual(editor.document.getText(), "# Entry\n\n", "document must be unchanged");
+        assert.strictEqual(lastStatus(posts)?.isError, true, "must report an error");
+      });
+    } finally {
+      // withActiveEntry cleans up.
+    }
+  });
+
+  test("primary insertion never opens the details panel, but the secondary Details action (mediaSelect) still does", async () => {
+    await activateExtension();
+    const root = await makeMediaRoot(["pic.png"]);
+    try {
+      await withActiveEntry("2026/08/29/insert-vs-details.md", "# Entry\n\n", async (editor) => {
+        editor.selection = new vscode.Selection(2, 0, 2, 0);
+        const posts: Record<string, unknown>[] = [];
+        const controller = makeController(posts, { mediaDir: root });
+
+        await controller.dispatch({ type: "mediaInsert", path: "pic.png" });
+        assert.strictEqual(mediaDetailsTabCount(), 0, "insertion must not open a details tab");
+
+        await controller.dispatch({ type: "mediaSelect", path: "pic.png" });
+        assert.strictEqual(
+          await waitFor(() => mediaDetailsTabCount() > 0, 2000),
+          true,
+          "the secondary Details action must still open the details panel"
+        );
+      });
+    } finally {
+      await fs.remove(root);
     }
   });
 });

@@ -29,6 +29,10 @@ suite("mediaWebviewSupport", () => {
       validateMediaMessage({ type: "mediaDelete", path: "clip.mp3" }),
       { type: "mediaDelete", path: "clip.mp3" }
     );
+    assert.deepStrictEqual(
+      validateMediaMessage({ type: "mediaInsert", path: "images/header.png" }),
+      { type: "mediaInsert", path: "images/header.png" }
+    );
   });
 
   test("entry-vocabulary types are not accepted as media messages (disjoint namespaces)", () => {
@@ -54,6 +58,15 @@ suite("mediaWebviewSupport", () => {
     );
     assert.strictEqual(validateMediaMessage({ type: "mediaOpen" }), undefined);
     assert.strictEqual(validateMediaMessage({ type: "mediaSelect" }), undefined);
+    assert.strictEqual(validateMediaMessage({ type: "mediaInsert" }), undefined);
+    assert.strictEqual(
+      validateMediaMessage({ type: "mediaInsert", path: "" }),
+      undefined
+    );
+    assert.strictEqual(
+      validateMediaMessage({ type: "mediaInsert", path: 42 }),
+      undefined
+    );
     assert.strictEqual(
       validateMediaMessage({ type: "mediaSelect", path: "" }),
       undefined
@@ -85,6 +98,14 @@ suite("mediaWebviewSupport", () => {
       validateMediaMessage({ type: "mediaOpen", path: "a".repeat(4096) }),
       { type: "mediaOpen", path: "a".repeat(4096) }
     );
+    assert.strictEqual(
+      validateMediaMessage({ type: "mediaInsert", path: "a".repeat(4097) }),
+      undefined
+    );
+    assert.deepStrictEqual(
+      validateMediaMessage({ type: "mediaInsert", path: "a".repeat(4096) }),
+      { type: "mediaInsert", path: "a".repeat(4096) }
+    );
   });
 
   test("path-bearing types ignore extraneous payload fields safely", () => {
@@ -95,6 +116,14 @@ suite("mediaWebviewSupport", () => {
         extra: "ignored",
       }),
       { type: "mediaDelete", path: "clip.mp3" }
+    );
+    assert.deepStrictEqual(
+      validateMediaMessage({
+        type: "mediaInsert",
+        path: "clip.mp3",
+        extra: "ignored",
+      }),
+      { type: "mediaInsert", path: "clip.mp3" }
     );
   });
 });

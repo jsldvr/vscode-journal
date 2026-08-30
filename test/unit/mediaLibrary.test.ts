@@ -9,6 +9,7 @@ import {
   hasSymlinkedAncestor,
   importMediaFile,
   isMediaRootDirectory,
+  isMediaRootWatchable,
   resolveContainedMediaFilePath,
   scanMediaDirectory,
   sortMediaFiles,
@@ -564,6 +565,49 @@ suite("mediaLibrary", () => {
 
     await withPatchedLstat(permissionError, async () => {
       assert.strictEqual(await isMediaRootDirectory(mediaRoot), false);
+    });
+  });
+
+  test("isMediaRootWatchable allows a real directory or a not-yet-created root, but rejects a symlinked root", async () => {
+    const mediaRoot = path.join(tempDir, "media");
+    assert.strictEqual(
+      await isMediaRootWatchable(mediaRoot),
+      true,
+      "a not-yet-created root is the normal lazy state"
+    );
+
+    await fs.ensureDir(mediaRoot);
+    assert.strictEqual(
+      await isMediaRootWatchable(mediaRoot),
+      true,
+      "a real directory is watchable"
+    );
+
+    await fs.remove(mediaRoot);
+    const outsideDir = await makeTempDir();
+    try {
+      const created = await trySymlinkDir(outsideDir, mediaRoot);
+      if (!created) {
+        return;
+      }
+      assert.strictEqual(
+        await isMediaRootWatchable(mediaRoot),
+        false,
+        "a media root that is itself a symlink must never reach the watcher"
+      );
+    } finally {
+      await fs.remove(outsideDir);
+    }
+  });
+
+  test("isMediaRootWatchable rejects a root that is a plain file, and fails closed on an unexpected lstat error", async () => {
+    const asFile = path.join(tempDir, "media");
+    await fs.writeFile(asFile, "not a directory");
+    assert.strictEqual(await isMediaRootWatchable(asFile), false);
+
+    const permissionError = Object.assign(new Error("EACCES"), { code: "EACCES" });
+    await withPatchedLstat(permissionError, async () => {
+      assert.strictEqual(await isMediaRootWatchable(path.join(tempDir, "x")), false);
     });
   });
 
