@@ -39,7 +39,9 @@ interface FactoryState {
 
 // Instruments real worker creation and exit so the resource-bound
 // assertions observe the actual thread lifecycle rather than a proxy.
-function countingWorkerFactory(): {
+// `terminateDelayMs` widens the termination window on purpose, so a
+// test can submit further requests while a worker is still exiting.
+function countingWorkerFactory(terminateDelayMs = 0): {
   make: () => Worker;
   state: FactoryState;
 } {
@@ -54,6 +56,16 @@ function countingWorkerFactory(): {
       worker.once("exit", () => {
         state.alive--;
       });
+      if (terminateDelayMs > 0) {
+        const realTerminate = worker.terminate.bind(worker);
+        (worker as unknown as { terminate: () => Promise<number> }).terminate =
+          async () => {
+            await new Promise((resolve) =>
+              setTimeout(resolve, terminateDelayMs)
+            );
+            return realTerminate();
+          };
+      }
       return worker;
     },
   };
@@ -255,6 +267,51 @@ suite("regexSearchPool", function () {
       `${factory.state.alive} workers still alive after dispose`
     );
     assert.strictEqual(factory.state.created, 7);
+    pool = undefined;
+  });
+
+  test("a request arriving while a worker is still terminating cannot spawn a second worker", async () => {
+    // Reproduces the concurrent-replacement interleave directly: A is
+    // running, B preempts it (A begins a deliberately slow terminate),
+    // then C and D are submitted synchronously *before* A has exited.
+    // With a per-call barrier those later requests see no `current` and
+    // spawn immediately (peak > 1). With the shared barrier they wait.
+    const factory = countingWorkerFactory(200);
+    pool = new RegexSearchPool(5000, factory.make);
+
+    const a = pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY, "T", 1));
+    const aAssert = assert.rejects(a, RegexSearchCancelledError);
+    await waitUntil(() => factory.state.created === 1);
+
+    // No await between these: B nulls `current` and starts A's slow
+    // termination; C and D arrive during that window.
+    const b = pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY, "T", 2));
+    const c = pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY, "T", 3));
+    const d = pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY, "T", 4));
+    const laterAsserts = [
+      assert.rejects(b, RegexSearchCancelledError),
+      assert.rejects(c, RegexSearchCancelledError),
+      assert.rejects(d, RegexSearchCancelledError),
+    ];
+
+    // Long enough for A to finish terminating and any unbarriered spawn
+    // to have happened.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.strictEqual(
+      factory.state.peak,
+      1,
+      `a second worker ran during termination: peak ${factory.state.peak}`
+    );
+
+    const last = pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY, "T", 5));
+    const lastAssert = assert.rejects(last, RegexSearchCancelledError);
+    await pool.dispose();
+    await Promise.all([aAssert, ...laterAsserts, lastAssert]);
+    assert.strictEqual(
+      factory.state.alive,
+      0,
+      `${factory.state.alive} workers still alive after dispose`
+    );
     pool = undefined;
   });
 
