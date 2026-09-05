@@ -5,6 +5,27 @@ import moment = require("moment");
 import { isPathInside, normalizeEntryPath } from "./pathUtils";
 import { parseEntryContent } from "./frontmatter";
 import { BlogEntry } from "./types";
+import {
+  JS_SNIPPET_RADIUS,
+  SNIPPET_END,
+  SNIPPET_START,
+  buildPatternSpec,
+  compilePattern,
+  truncatedHead,
+} from "./regexMatch";
+import { RegexSearchPool } from "./regexSearchPool";
+
+// Re-exported so existing importers (searchView, the unit suite) keep a
+// single entry point for search errors and snippet helpers even though
+// the pattern-matching internals now live in dedicated modules that the
+// worker thread can load without sqlite3.
+export { SNIPPET_START, SNIPPET_END };
+export { InvalidSearchPatternError, makeMatchSnippet } from "./regexMatch";
+export {
+  RegexSearchError,
+  RegexSearchTimeoutError,
+  RegexSearchCancelledError,
+} from "./regexSearchPool";
 
 // Generated state lives under <entries>/.vs-journal/. Markdown remains
 // authoritative; everything in this directory is disposable and is
@@ -12,11 +33,6 @@ import { BlogEntry } from "./types";
 // written by an incompatible schema version.
 export const GENERATED_DIR_NAME = ".vs-journal";
 export const DB_FILE_NAME = "index.sqlite3";
-
-// Snippet highlight markers. The webview splits on these and wraps the
-// highlighted ranges; they never survive into rendered HTML.
-export const SNIPPET_START = "\u0001";
-export const SNIPPET_END = "\u0002";
 
 const SCHEMA_VERSION = 2;
 // Documented busy timeout: a second extension host (two VS Code windows
@@ -28,7 +44,6 @@ const SEARCH_LIMIT = 100;
 // A trigram token advances one character at a time, so snippet token
 // counts are roughly characters; 64 is the FTS5 maximum.
 const SNIPPET_TOKENS = 64;
-const JS_SNIPPET_RADIUS = 30;
 
 export interface SearchHit extends BlogEntry {
   snippet: string;
@@ -51,11 +66,6 @@ export interface SearchOptions {
   useRegex?: boolean;
 }
 
-// Thrown when useRegex is set and the query does not compile; callers
-// surface this as a friendly inline message instead of a generic
-// search failure.
-export class InvalidSearchPatternError extends Error {}
-
 interface EntryFileStat {
   absolutePath: string;
   relativePath: string;
@@ -75,6 +85,17 @@ export class BlogIndex {
   private db: sqlite3.Database | undefined;
   private writeQueue: Promise<void> = Promise.resolve();
   private ftsAvailable = false;
+  // Isolates the matchCase/wholeWord/useRegex scan on a worker thread
+  // with an enforced per-request deadline so a pathological pattern
+  // cannot block the extension host. Created eagerly (no worker is
+  // spawned until the first pattern search) and torn down by close().
+  private readonly regexPool = new RegexSearchPool();
+  // Strictly increasing id assigned in search-submission order and
+  // carried into regexPool.run(). The database read in
+  // searchWithPattern can finish out of submission order, so the pool
+  // needs this to tell "newer search" from "read that happened to
+  // return last" and never let the latter cancel the former's worker.
+  private searchRequestSequence = 0;
 
   readonly entriesDir: string;
   readonly dbPath: string;
@@ -138,6 +159,11 @@ export class BlogIndex {
     await this.enqueue(async () => {
       await this.closeQuietly();
     });
+    // Independent of the write queue and the database connection: the
+    // regex worker owns no SQLite handle. Disposing here terminates any
+    // in-flight worker and rejects its pending promise, so a search
+    // running while the index closes settles instead of leaking.
+    await this.regexPool.dispose();
   }
 
   private closeQuietly(): Promise<void> {
@@ -523,16 +549,28 @@ export class BlogIndex {
       }));
   }
 
-  // JS-side scan used only when matchCase/wholeWord/useRegex is active.
-  // These modes can't be expressed as an FTS5 MATCH or a LIKE pattern,
-  // so this bypasses the index entirely and filters every entry's
-  // title/body in memory -- acceptable at personal-journal scale, the
-  // same scale the LIKE fallback already assumes.
+  // Scan used only when matchCase/wholeWord/useRegex is active. These
+  // modes can't be expressed as an FTS5 MATCH or a LIKE pattern, so the
+  // index is bypassed and every entry's title/body is matched in memory
+  // -- acceptable at personal-journal scale, the same scale the LIKE
+  // fallback already assumes. The match itself runs on a worker thread
+  // (see RegexSearchPool): a catastrophic pattern can block whatever
+  // thread evaluates it, so it must never be the extension host's.
+  // Ordering (date descending), the SEARCH_LIMIT cap, the title
+  // fallback, and snippet shape are unchanged from the previous
+  // in-process scan.
   private async searchWithPattern(
     query: string,
     options: SearchOptions
   ): Promise<SearchHit[]> {
-    const pattern = buildSearchPattern(query, options);
+    // Assigned before the (reorderable) database read so the pool sees
+    // requests in submission order, not read-completion order.
+    const requestId = ++this.searchRequestSequence;
+    const spec = buildPatternSpec(query, options);
+    // Compile once on the host purely to reject an invalid pattern with
+    // the friendly InvalidSearchPatternError before a worker is spawned;
+    // RegExp compilation is bounded, only matching is not.
+    compilePattern(spec);
     const rows = await this.all<
       EntryRow & { tags: string | null; body: string }
     >(
@@ -543,27 +581,28 @@ export class BlogIndex {
          FROM entries e
         ORDER BY e.date DESC`
     );
-    const hits: SearchHit[] = [];
-    for (const row of rows) {
-      if (!this.isSafeRelativePath(row.path)) {
-        continue;
-      }
-      const bodyMatch = pattern.exec(row.body);
-      if (!bodyMatch && !pattern.test(row.title)) {
-        continue;
-      }
-      hits.push({
-        title: row.title,
-        date: row.date,
+    const safeRows = rows.filter((row) => this.isSafeRelativePath(row.path));
+    const hits = await this.regexPool.run({
+      id: requestId,
+      rows: safeRows.map((row) => ({
         path: row.path,
-        tags: splitConcatenatedTags(row.tags),
-        snippet: makeMatchSnippet(row.body, bodyMatch),
-      });
-      if (hits.length >= SEARCH_LIMIT) {
-        break;
-      }
-    }
-    return hits;
+        title: row.title,
+        body: row.body,
+      })),
+      spec,
+      limit: SEARCH_LIMIT,
+    });
+    const rowByPath = new Map(safeRows.map((row) => [row.path, row]));
+    return hits.map((hit) => {
+      const row = rowByPath.get(hit.path);
+      return {
+        title: row?.title ?? "",
+        date: row?.date ?? "",
+        path: hit.path,
+        tags: splitConcatenatedTags(row?.tags ?? null),
+        snippet: hit.snippet,
+      };
+    });
   }
 
   private async searchTagNames(query: string): Promise<TagHit[]> {
@@ -852,11 +891,6 @@ function likeContains(term: string): string {
   return `%${escapeLikePattern(term)}%`;
 }
 
-function truncatedHead(body: string): string {
-  const head = body.slice(0, JS_SNIPPET_RADIUS * 2).trim();
-  return head.length < body.trim().length ? `${head}...` : head;
-}
-
 // JS-side snippet for the LIKE fallback, built from the already-indexed
 // body (no Markdown file reads), using the same highlight markers as
 // the FTS snippet() output.
@@ -874,48 +908,6 @@ export function makeLikeSnippet(body: string, query: string): string {
   const matched = body.slice(position, position + query.length);
   const after = body.slice(position + query.length, end);
   return `${prefix}${before}${SNIPPET_START}${matched}${SNIPPET_END}${after}${suffix}`;
-}
-
-// Snippet for the matchCase/wholeWord/useRegex scan, built from a
-// RegExpExecArray instead of a literal query. A zero-length match (an
-// all-optional regex) is treated the same as "no match" -- there is
-// nothing meaningful to highlight.
-export function makeMatchSnippet(
-  body: string,
-  match: RegExpExecArray | null
-): string {
-  if (!match || match[0].length === 0) {
-    return truncatedHead(body);
-  }
-  const position = match.index;
-  const length = match[0].length;
-  const start = Math.max(0, position - JS_SNIPPET_RADIUS);
-  const end = Math.min(body.length, position + length + JS_SNIPPET_RADIUS);
-  const prefix = start > 0 ? "..." : "";
-  const suffix = end < body.length ? "..." : "";
-  const before = body.slice(start, position);
-  const matched = body.slice(position, position + length);
-  const after = body.slice(position + length, end);
-  return `${prefix}${before}${SNIPPET_START}${matched}${SNIPPET_END}${after}${suffix}`;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Builds the RegExp for the matchCase/wholeWord/useRegex scan. Thrown
-// SyntaxErrors from an invalid useRegex pattern are normalized to
-// InvalidSearchPatternError so callers don't need to know RegExp's
-// error shape.
-function buildSearchPattern(query: string, options: SearchOptions): RegExp {
-  const source = options.useRegex ? query : escapeRegExp(query);
-  const bounded = options.wholeWord ? `\\b(?:${source})\\b` : source;
-  const flags = options.matchCase ? "" : "i";
-  try {
-    return new RegExp(bounded, flags);
-  } catch {
-    throw new InvalidSearchPatternError("Invalid regular expression");
-  }
 }
 
 function openDatabase(dbPath: string): Promise<sqlite3.Database> {

@@ -484,6 +484,44 @@ suite("blogIndex", function () {
     );
   });
 
+  // Note: catastrophic-backtracking cases against the production
+  // BlogIndex.search path deliberately live only in
+  // test/unit/regexSearchHostProbe.test.ts, which supervises them from
+  // an outer process. Running "(a+)+$" here would hang the whole Mocha
+  // process (not just fail its test) if worker isolation ever
+  // regressed, and Mocha's same-thread timeout could not interrupt it.
+
+  test("regex lookarounds and backreferences still match through the index", async () => {
+    await writeEntry(
+      entriesDir,
+      "look.md",
+      entryMarkdown("Look", "the total is 128 units and hello hello there")
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    const lookaround = await index.search("(?<=is )\\d+", { useRegex: true });
+    assert.strictEqual(lookaround.entries.length, 1);
+    assert.ok(lookaround.entries[0].snippet.includes(`${SNIPPET_START}128`));
+
+    const backref = await index.search("(\\w+) \\1", { useRegex: true });
+    assert.strictEqual(backref.entries.length, 1);
+  });
+
+  test("a zero-length regex match yields a non-highlighted snippet", async () => {
+    await writeEntry(
+      entriesDir,
+      "zero.md",
+      entryMarkdown("Zero", "plain body with no special structure")
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    const result = await index.search("x*", { useRegex: true });
+    assert.strictEqual(result.entries.length, 1);
+    assert.ok(!result.entries[0].snippet.includes(SNIPPET_START));
+  });
+
   test("regex and wholeWord combine (bounded pattern)", async () => {
     await writeEntry(
       entriesDir,
