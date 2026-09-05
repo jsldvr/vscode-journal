@@ -3,6 +3,7 @@ import * as fs from "fs-extra";
 import * as path from "path";
 import moment = require("moment");
 import { BlogIndex } from "./blogIndex";
+import { IndexLifecycle } from "./indexLifecycle";
 import { SearchViewProvider } from "./searchView";
 import {
   hasSymlinkedAncestor,
@@ -161,14 +162,27 @@ async function revealMediaDirectory(): Promise<void> {
 // Owns the lifecycle of the SQLite index for the configured journal:
 // opens it on activation, reopens it when vsJournal.blogPath changes,
 // and closes it on deactivation. All consumers reach the index through
-// get()/ensure() so a reopen can never leak a stale connection.
+// get()/ensure(), and generation ownership (see IndexLifecycle) makes a
+// blogPath change mid-open retire that open rather than let it publish
+// directory A's index under configuration B.
 class IndexHost {
-  private index: BlogIndex | undefined;
-  private opening: Promise<BlogIndex | undefined> | undefined;
-  private openingCreateBlogDir = false;
+  private readonly lifecycle: IndexLifecycle<BlogIndex>;
+
+  constructor() {
+    this.lifecycle = new IndexLifecycle<BlogIndex>({
+      resolveTarget: () => this.entriesDir(),
+      open: (entriesDir, createBlogDir) =>
+        this.openForConfig(entriesDir, createBlogDir),
+      close: (index) => index.close(),
+    });
+  }
 
   get(): BlogIndex | undefined {
-    return this.index;
+    return this.lifecycle.get();
+  }
+
+  isDisposed(): boolean {
+    return this.lifecycle.isDisposed();
   }
 
   entriesDir(): string | undefined {
@@ -179,43 +193,36 @@ class IndexHost {
   // Opens (or returns) the index for the current configuration. The
   // database is created on demand, but only once the blog directory
   // itself exists so activation never scaffolds directories into
-  // workspaces that don't use the extension.
-  async ensure(createBlogDir = false): Promise<BlogIndex | undefined> {
-    if (this.index) {
-      return this.index;
-    }
-    if (this.opening && createBlogDir && !this.openingCreateBlogDir) {
-      // An in-flight open that started without directory creation can't
-      // satisfy a caller that needs one (e.g. New Entry racing
-      // activation's initializeIndex()); wait it out, then retry with
-      // creation enabled instead of inheriting its undefined result.
-      await this.opening;
-      return this.ensure(true);
-    }
-    if (!this.opening) {
-      this.openingCreateBlogDir = createBlogDir;
-      this.opening = this.openForConfig(createBlogDir);
-    }
-    const opened = await this.opening;
-    this.opening = undefined;
-    return opened;
+  // workspaces that don't use the extension. A caller always receives
+  // the current directory's index or undefined, never one retired by a
+  // concurrent blogPath change.
+  ensure(createBlogDir = false): Promise<BlogIndex | undefined> {
+    return this.lifecycle.ensure(createBlogDir);
+  }
+
+  // Closes the active index and retires any in-flight open so the next
+  // ensure() reopens for the new configuration.
+  reopen(): Promise<void> {
+    return this.lifecycle.invalidate();
+  }
+
+  // Terminal and idempotent: awaits the in-flight open and every owned
+  // close; no later ensure() can reopen.
+  dispose(): Promise<void> {
+    return this.lifecycle.dispose();
   }
 
   private async openForConfig(
+    entriesDir: string,
     createBlogDir: boolean
   ): Promise<BlogIndex | undefined> {
-    const entriesDir = this.entriesDir();
-    if (!entriesDir) {
-      return undefined;
-    }
     const blogDir = path.dirname(entriesDir);
     if (!createBlogDir && !(await fs.pathExists(blogDir))) {
       return undefined;
     }
     try {
       await fs.ensureDir(entriesDir);
-      this.index = await BlogIndex.open(entriesDir);
-      return this.index;
+      return await BlogIndex.open(entriesDir);
     } catch (error) {
       console.error("VS Journal: failed to open the entry index:", error);
       vscode.window.showErrorMessage(
@@ -223,17 +230,6 @@ class IndexHost {
       );
       return undefined;
     }
-  }
-
-  async reopen(): Promise<void> {
-    const previous = this.index;
-    this.index = undefined;
-    this.opening = undefined;
-    await previous?.close();
-  }
-
-  async dispose(): Promise<void> {
-    await this.reopen();
   }
 }
 
@@ -468,6 +464,12 @@ export function activate(context: vscode.ExtensionContext) {
   async function handleBlogPathChange() {
     await host.reopen();
     await initializeIndex();
+    // Deactivation (or, at worst, a redundant newer change) may have run
+    // while the index reopened; never rebind watchers or repaint views
+    // as current after the host has been disposed.
+    if (host.isDisposed()) {
+      return;
+    }
     rebindFileWatcher();
     await rebindMediaWatcher();
     searchView.clear();
@@ -502,6 +504,12 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
     await index.reconcile();
+    // A blogPath change or deactivation during reconcile() retires this
+    // index; don't present its contents or offer its gitignore rule as
+    // the current journal.
+    if (host.get() !== index) {
+      return;
+    }
     refreshEntryViews();
     await maybeOfferGitignoreRule(context, index.entriesDir);
   }
