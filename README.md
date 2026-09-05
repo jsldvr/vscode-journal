@@ -63,6 +63,12 @@ section header between them.
   every entry's title and body using the equivalent `RegExp`, matching how
   VS Code's own Search panel behaves. An invalid regex shows an inline error
   instead of failing silently. These toggles do not affect `tag:` queries.
+- The Match Case / Whole Word / Regex scan runs on a worker thread with a
+  fixed 2-second budget per search. A pattern that exceeds it (for example a
+  regex with catastrophic backtracking such as `(a+)+$` over a long line) is
+  stopped and reported as an inline "Regex search timed out" error; the editor
+  stays responsive and the next search works normally. Simplify the expression
+  or turn off the Regex toggle. Rebuilding the index does not help here.
 - Results are ranked by full-text relevance (title matches weigh more than
   body matches) and include a highlighted snippet plus date, path, and tags.
 - Queries shorter than 3 characters use an indexed database fallback; no

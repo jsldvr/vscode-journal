@@ -1,6 +1,13 @@
 import * as vscode from "vscode";
 import * as crypto from "crypto";
-import { BlogIndex, InvalidSearchPatternError, SearchOptions, SearchResponse } from "./blogIndex";
+import {
+  BlogIndex,
+  InvalidSearchPatternError,
+  RegexSearchCancelledError,
+  RegexSearchTimeoutError,
+  SearchOptions,
+  SearchResponse,
+} from "./blogIndex";
 import { validateWebviewMessage, InboundWebviewMessage } from "./webviewSupport";
 import { groupEntriesByYearMonth } from "./entryGrouping";
 import { MediaController, MediaControllerDeps, MEDIA_BODY_HTML, MEDIA_SCRIPT, MEDIA_STYLES } from "./mediaView";
@@ -33,6 +40,14 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private lastQuery = "";
   private lastOptions: SearchOptions = {};
+  // Monotonic id for the in-flight search. Every runSearch() call takes
+  // the next value; a resolved query (or its error) is only rendered
+  // while its id is still current, so a slow regex that finishes after
+  // a newer search, a changed toggle, Clear, or view disposal cannot
+  // overwrite the visible state. Identical query text with different
+  // toggles is a distinct request because it is a distinct runSearch()
+  // call.
+  private searchGeneration = 0;
   private pendingFocus = false;
   private webviewReady = false;
   private outbox: Record<string, unknown>[] = [];
@@ -68,6 +83,9 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
         this.view = undefined;
         this.webviewReady = false;
         this.outbox = [];
+        // Retire any in-flight search so a late result/error cannot be
+        // posted at (or resurrect) a disposed view.
+        this.searchGeneration++;
         this.mediaController.unbind();
       }
     });
@@ -88,6 +106,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 
   clear(): void {
     this.lastQuery = "";
+    this.searchGeneration++;
     this.post({ type: "cleared" });
   }
 
@@ -167,6 +186,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
       }
       case "clear":
         this.lastQuery = "";
+        this.searchGeneration++;
         return;
       case "open":
         await this.deps.openEntry(message.path);
@@ -223,6 +243,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async runSearch(query: string, options: SearchOptions): Promise<void> {
+    const generation = ++this.searchGeneration;
     const index = this.deps.getIndex();
     if (!index) {
       this.post({
@@ -233,6 +254,9 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     }
     try {
       const response: SearchResponse = await index.search(query, options);
+      if (generation !== this.searchGeneration) {
+        return;
+      }
       this.post({
         type: "results",
         query: response.query,
@@ -240,8 +264,29 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
         tags: response.tags,
       });
     } catch (error) {
+      if (generation !== this.searchGeneration) {
+        return;
+      }
       if (error instanceof InvalidSearchPatternError) {
         this.post({ type: "error", message: "Invalid regular expression." });
+        return;
+      }
+      if (error instanceof RegexSearchTimeoutError) {
+        // A bounded per-request budget elapsed inside the isolated
+        // matcher. Recoverable: the next search starts a fresh worker.
+        // Rebuilding the index is not the remedy, so this message does
+        // not mention it.
+        this.post({
+          type: "error",
+          message:
+            "Regex search timed out. Simplify the expression or turn off the Regex toggle, then search again.",
+        });
+        return;
+      }
+      if (error instanceof RegexSearchCancelledError) {
+        // The run was abandoned because the index closed or the pool
+        // was disposed out from under it; a newer request already owns
+        // the view. Nothing to surface.
         return;
       }
       console.error("VS Journal search failed:", error);
@@ -748,11 +793,13 @@ const WEBVIEW_SCRIPT = `
     }
   }
 
-  // Safety net: the extension host always responds (success or error),
-  // but if a stale webview ever talks to a mismatched extension build
-  // (e.g. an un-reloaded window after a recompile) a response could go
-  // missing. Without this, "Searching..." would hang forever with no
-  // way out.
+  // Safety net only. The extension host now bounds every search itself
+  // (a regex scan runs on a worker thread with an enforced budget and
+  // always comes back as results or an actionable error), so this timer
+  // exists purely for the case where no response arrives at all -- e.g.
+  // a stale webview talking to a mismatched, un-reloaded extension
+  // build. Without it, "Searching..." would hang forever with no way
+  // out.
   var SEARCH_TIMEOUT_MS = 10000;
   var searchTimeoutHandle = null;
 
@@ -767,11 +814,11 @@ const WEBVIEW_SCRIPT = `
     clearSearchTimeout();
     searchTimeoutHandle = setTimeout(function () {
       if (state.query === query) {
-        // Not renderError(): a slow regex/whole-journal scan is normal,
-        // not a failure, so this stays neutral status text rather than
-        // the red error styling.
+        // Not renderError(): reaching this point means no response came
+        // back at all (not a reported timeout, which arrives as an
+        // error), so it stays neutral status text rather than red.
         setStatus(
-          "Still searching -- this can take longer for a large journal or a broad regex. If it never finishes, try 'Developer: Reload Window' and search again.",
+          "Still waiting for a response. If this does not clear, run 'Developer: Reload Window' and search again.",
           false
         );
       }

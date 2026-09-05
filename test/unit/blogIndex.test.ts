@@ -8,6 +8,7 @@ import {
   DB_FILE_NAME,
   GENERATED_DIR_NAME,
   InvalidSearchPatternError,
+  RegexSearchTimeoutError,
   SNIPPET_START,
   makeLikeSnippet,
 } from "../../src/blogIndex";
@@ -482,6 +483,92 @@ suite("blogIndex", function () {
       index.search("(unclosed", { useRegex: true }),
       InvalidSearchPatternError
     );
+  });
+
+  test("a catastrophic regex against the body is stopped and rejects with a timeout", async () => {
+    await writeEntry(
+      entriesDir,
+      "boom.md",
+      entryMarkdown("Boom", `${"a".repeat(45)}!`)
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    await assert.rejects(
+      index.search("(a+)+$", { useRegex: true }),
+      RegexSearchTimeoutError
+    );
+  });
+
+  test("a catastrophic regex against the title is stopped and rejects with a timeout", async () => {
+    await writeEntry(
+      entriesDir,
+      "boomtitle.md",
+      entryMarkdown(`${"a".repeat(45)}!`, "short body")
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    await assert.rejects(
+      index.search("(a+)+$", { useRegex: true }),
+      RegexSearchTimeoutError
+    );
+  });
+
+  test("an ordinary search still succeeds after a regex timeout, no reopen", async () => {
+    await writeEntry(
+      entriesDir,
+      "boom.md",
+      entryMarkdown("Boom", `${"a".repeat(45)}!`)
+    );
+    await writeEntry(
+      entriesDir,
+      "calm.md",
+      entryMarkdown("Calm", "an ordinary searchable body")
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    await assert.rejects(
+      index.search("(a+)+$", { useRegex: true }),
+      RegexSearchTimeoutError
+    );
+
+    const literal = await index.search("ordinary searchable");
+    assert.strictEqual(literal.entries.length, 1);
+    const regexAgain = await index.search("ord\\w+", { useRegex: true });
+    assert.strictEqual(regexAgain.entries.length, 1);
+  });
+
+  test("regex lookarounds and backreferences still match through the index", async () => {
+    await writeEntry(
+      entriesDir,
+      "look.md",
+      entryMarkdown("Look", "the total is 128 units and hello hello there")
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    const lookaround = await index.search("(?<=is )\\d+", { useRegex: true });
+    assert.strictEqual(lookaround.entries.length, 1);
+    assert.ok(lookaround.entries[0].snippet.includes(`${SNIPPET_START}128`));
+
+    const backref = await index.search("(\\w+) \\1", { useRegex: true });
+    assert.strictEqual(backref.entries.length, 1);
+  });
+
+  test("a zero-length regex match yields a non-highlighted snippet", async () => {
+    await writeEntry(
+      entriesDir,
+      "zero.md",
+      entryMarkdown("Zero", "plain body with no special structure")
+    );
+    index = await BlogIndex.open(entriesDir);
+    await index.reconcile();
+
+    const result = await index.search("x*", { useRegex: true });
+    assert.strictEqual(result.entries.length, 1);
+    assert.ok(!result.entries[0].snippet.includes(SNIPPET_START));
   });
 
   test("regex and wholeWord combine (bounded pattern)", async () => {
