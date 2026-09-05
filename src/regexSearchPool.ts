@@ -34,7 +34,15 @@ export class RegexSearchCancelledError extends RegexSearchError {}
 // simplify.
 export class RegexSearchUnavailableError extends RegexSearchError {}
 
+// A regex-search request. `id` is a caller-assigned, strictly
+// increasing sequence number in *search submission* order. The pool
+// admits requests by `id`, not by arrival order, because the database
+// read that precedes a request can finish out of submission order
+// (node-sqlite3 does not serialize overlapping reads) -- without the id
+// an older search that reads slowly could arrive last and cancel the
+// worker a newer search already owns.
 export interface RegexSearchRequest {
+  id: number;
   rows: RegexSearchJob["rows"];
   spec: RegexSearchJob["spec"];
   limit: number;
@@ -59,20 +67,22 @@ function describeError(error: unknown): string {
 }
 
 // A single in-flight regex-search execution: owns exactly one Worker
-// and one deadline timer, and settles its `done` promise exactly once
-// (success, timeout, cancellation, or worker failure), tearing down the
-// worker and timer on the way out.
+// and one deadline timer, settles its `done` promise exactly once
+// (success, timeout, cancellation, or worker failure), and exposes
+// `whenTerminated()` so the pool can wait for the worker thread to
+// actually exit before starting or disposing.
 class RegexSearchRun {
   readonly done: Promise<RegexSearchHit[]>;
 
   private worker: Worker | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private settled = false;
+  private terminated: Promise<void> = Promise.resolve();
   private resolveDone: (hits: RegexSearchHit[]) => void = () => undefined;
   private rejectDone: (error: Error) => void = () => undefined;
 
   constructor(
-    private readonly request: RegexSearchRequest,
+    private readonly job: RegexSearchJob,
     private readonly budgetMs: number,
     private readonly onFinished: (run: RegexSearchRun) => void
   ) {
@@ -117,11 +127,17 @@ class RegexSearchRun {
         )
       );
     });
-    this.worker.postMessage(this.request);
+    this.worker.postMessage(this.job);
   }
 
   cancel(error: Error): void {
     this.fail(error);
+  }
+
+  // Resolves when this run's worker thread has fully exited (or
+  // immediately if it never started one). Safe to await repeatedly.
+  whenTerminated(): Promise<void> {
+    return this.terminated;
   }
 
   private handleMessage(response: WorkerResponse): void {
@@ -163,34 +179,58 @@ class RegexSearchRun {
     this.worker = undefined;
     if (worker) {
       worker.removeAllListeners();
-      void worker.terminate();
+      // Keep the termination promise so the pool can wait for the
+      // thread to be gone: merely calling terminate() and moving on
+      // would let a burst of superseded searches stack live threads.
+      this.terminated = worker.terminate().then(
+        () => undefined,
+        () => undefined
+      );
     }
     this.onFinished(this);
   }
 }
 
-// Bounds the isolated regex scan to a single live worker: a new request
-// tears down any in-flight run (and terminates its worker) before
-// starting its own, and disposal terminates the current run. There is
-// never a synchronous host-thread fallback -- a worker failure is
-// reported as an error, and the next search simply starts a fresh
-// worker.
+// Bounds the isolated regex scan to a single live worker. A request is
+// admitted only if its id is strictly newer than the last admitted id
+// (so a reordered older search cannot cancel a newer one's worker);
+// admitting a request cancels the previous run and waits for its worker
+// to exit before spawning the replacement; disposal cancels the current
+// run and waits for every worker it started to exit. There is never a
+// synchronous host-thread fallback -- a worker failure is reported as
+// an error, and the next search simply starts a fresh worker.
 export class RegexSearchPool {
   private current: RegexSearchRun | undefined;
+  private latestRequestId = 0;
   private disposed = false;
+  private readonly draining = new Set<RegexSearchRun>();
 
   constructor(private readonly budgetMs: number = REGEX_SEARCH_BUDGET_MS) {}
 
-  run(request: RegexSearchRequest): Promise<RegexSearchHit[]> {
+  async run(request: RegexSearchRequest): Promise<RegexSearchHit[]> {
     if (this.disposed) {
-      return Promise.reject(
-        new RegexSearchCancelledError("regex search pool is disposed")
-      );
+      throw new RegexSearchCancelledError("regex search pool is disposed");
     }
-    this.cancelCurrent(
+    if (request.id <= this.latestRequestId) {
+      // A newer search already owns (or has owned) the pool. Reject
+      // this stale request without disturbing the current worker.
+      throw new RegexSearchCancelledError("superseded by a newer search");
+    }
+    this.latestRequestId = request.id;
+    await this.retireCurrent(
       new RegexSearchCancelledError("superseded by a newer search")
     );
-    const run = new RegexSearchRun(request, this.budgetMs, (finished) => {
+    if (this.disposed || request.id !== this.latestRequestId) {
+      // Disposed, or a still-newer request arrived while the previous
+      // worker was terminating -- this one is already obsolete.
+      throw new RegexSearchCancelledError("superseded by a newer search");
+    }
+    const job: RegexSearchJob = {
+      rows: request.rows,
+      spec: request.spec,
+      limit: request.limit,
+    };
+    const run = new RegexSearchRun(job, this.budgetMs, (finished) => {
       if (this.current === finished) {
         this.current = undefined;
       }
@@ -200,16 +240,32 @@ export class RegexSearchPool {
     return run.done;
   }
 
-  private cancelCurrent(error: Error): void {
-    const run = this.current;
+  // Cancels the active run and waits for its worker thread to actually
+  // exit before returning, so at most one worker is ever live even
+  // under a burst of superseding searches.
+  private async retireCurrent(reason: Error): Promise<void> {
+    const previous = this.current;
     this.current = undefined;
-    run?.cancel(error);
+    if (!previous) {
+      return;
+    }
+    previous.cancel(reason);
+    this.draining.add(previous);
+    try {
+      await previous.whenTerminated();
+    } finally {
+      this.draining.delete(previous);
+    }
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
-    this.cancelCurrent(
+    await this.retireCurrent(
       new RegexSearchCancelledError("regex search pool is disposed")
+    );
+    // Wait out any worker still terminating inside a concurrent run().
+    await Promise.allSettled(
+      [...this.draining].map((run) => run.whenTerminated())
     );
   }
 }

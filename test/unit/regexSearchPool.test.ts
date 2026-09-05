@@ -13,12 +13,16 @@ import {
 const CATASTROPHIC = buildPatternSpec("(a+)+$", { useRegex: true });
 const PATHOLOGICAL_BODY = `${"a".repeat(42)}!`;
 
+let nextId = 0;
+
 function jobFor(
   spec: RegexSearchRequest["spec"],
   body: string,
-  title = "Title"
+  title = "Title",
+  id = ++nextId
 ): RegexSearchRequest {
   return {
+    id,
     rows: [{ path: "entry.md", title, body }],
     spec,
     limit: 100,
@@ -29,6 +33,10 @@ suite("regexSearchPool", function () {
   this.timeout(20000);
 
   let pool: RegexSearchPool | undefined;
+
+  setup(() => {
+    nextId = 0;
+  });
 
   teardown(async () => {
     await pool?.dispose();
@@ -122,6 +130,36 @@ suite("regexSearchPool", function () {
     await staleAssertion;
   });
 
+  test("an older request (lower id) never cancels the current run", async () => {
+    pool = new RegexSearchPool(5000);
+    // The newer search (id 2) is admitted first because its database
+    // read finished first; the older search (id 1) arrives afterwards.
+    const current = pool.run(
+      jobFor(buildPatternSpec("keeper", {}), "the keeper body text", "T", 2)
+    );
+    const straggler = pool.run(
+      jobFor(CATASTROPHIC, PATHOLOGICAL_BODY, "T", 1)
+    );
+    await assert.rejects(straggler, RegexSearchCancelledError);
+    // The current run must have survived the older arrival.
+    const hits = await current;
+    assert.strictEqual(hits.length, 1);
+    assert.strictEqual(hits[0].path, "entry.md");
+  });
+
+  test("a repeated id is rejected as stale without disturbing the current run", async () => {
+    pool = new RegexSearchPool(5000);
+    const current = pool.run(
+      jobFor(buildPatternSpec("held", {}), "held body", "T", 7)
+    );
+    await assert.rejects(
+      pool.run(jobFor(buildPatternSpec("x", {}), "x", "T", 7)),
+      RegexSearchCancelledError
+    );
+    const hits = await current;
+    assert.strictEqual(hits.length, 1);
+  });
+
   test("dispose settles an in-flight run and rejects further requests", async () => {
     pool = new RegexSearchPool(5000);
     const inflight = pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY));
@@ -138,6 +176,40 @@ suite("regexSearchPool", function () {
     pool = undefined;
   });
 
+  test("at most one worker is live under a burst, and dispose leaves none", async () => {
+    pool = new RegexSearchPool(5000);
+    const rejections: Promise<void>[] = [];
+    let peak = 0;
+    for (let i = 0; i < 10; i++) {
+      rejections.push(
+        assert.rejects(
+          pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY)),
+          RegexSearchCancelledError
+        )
+      );
+      // Yield so each supersession's terminate() can be observed.
+      await new Promise((resolve) => setImmediate(resolve));
+      peak = Math.max(peak, countRegexWorkers());
+    }
+    const last = pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY));
+    const lastAssertion = assert.rejects(last, RegexSearchCancelledError);
+
+    // retireCurrent() awaits each terminate() before the next spawn, so
+    // the burst never stacks threads.
+    assert.ok(peak <= 2, `burst stacked ${peak} live workers`);
+
+    await pool.dispose();
+    await Promise.all(rejections);
+    await lastAssertion;
+    // dispose() returns only after every worker it started has exited.
+    assert.strictEqual(
+      countRegexWorkers(),
+      0,
+      "dispose returned with workers still live"
+    );
+    pool = undefined;
+  });
+
   test("an invalid pattern that reaches the worker rejects, not hangs", async () => {
     pool = new RegexSearchPool(2000);
     await assert.rejects(
@@ -146,3 +218,11 @@ suite("regexSearchPool", function () {
     );
   });
 });
+
+// Count of live regex worker threads owned by this process. Stable
+// since Node 17; entries are resource-type strings such as "Worker".
+function countRegexWorkers(): number {
+  return process
+    .getActiveResourcesInfo()
+    .filter((entry) => entry === "Worker").length;
+}

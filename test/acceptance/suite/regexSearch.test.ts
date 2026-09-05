@@ -16,8 +16,11 @@ import {
 const CATASTROPHIC = buildPatternSpec("(a+)+$", { useRegex: true });
 const PATHOLOGICAL_BODY = `${"a".repeat(48)}!`;
 
+let nextId = 0;
+
 function job(spec: ReturnType<typeof buildPatternSpec>, body: string) {
   return {
+    id: ++nextId,
     rows: [{ path: "entry.md", title: "Title", body }],
     spec,
     limit: 100,

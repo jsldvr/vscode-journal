@@ -15,7 +15,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   line) previously executed synchronously on the extension host and could
   freeze the window; it is now terminated at the budget and reported inline as
   "Regex search timed out", the editor stays responsive, and the next search
-  works without a reload. Literal/FTS and `tag:` searches, the other toggles,
+  works without a reload. Overlapping searches settle in submission order, so a
+  slower earlier search can no longer cancel a newer one into a stuck
+  "Searching..." state. Literal/FTS and `tag:` searches, the other toggles,
   supported regex syntax, result ordering, the result limit, snippets, and the
   friendly invalid-pattern error are unchanged.
 

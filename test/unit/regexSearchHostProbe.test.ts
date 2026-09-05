@@ -2,13 +2,13 @@ import * as assert from "assert";
 import { fork } from "child_process";
 import * as path from "path";
 
-// Runs the real pathological search through the production BlogIndex
+// Runs the real pathological searches through the production BlogIndex
 // path in a separate process (regexSearchHostProbe.js) and enforces an
 // independent outer deadline here by killing that process. A same-thread
 // Mocha timeout could not protect this runner from a regression to
 // synchronous host-thread matching; forking can.
 const PROBE = path.resolve(__dirname, "regexSearchHostProbe.js");
-const OUTER_DEADLINE_MS = 20000;
+const OUTER_DEADLINE_MS = 45000;
 
 interface ProbeResult {
   code: number | null;
@@ -47,9 +47,9 @@ function runProbe(): Promise<ProbeResult> {
 }
 
 suite("regex search host responsiveness (isolated process)", function () {
-  this.timeout(OUTER_DEADLINE_MS + 15000);
+  this.timeout(OUTER_DEADLINE_MS + 20000);
 
-  test("a catastrophic search returns a timeout while the host thread keeps ticking", async () => {
+  test("catastrophic searches time out cleanly, recover, and never stall a newer overlapping search", async () => {
     const result = await runProbe();
 
     assert.strictEqual(
@@ -70,19 +70,22 @@ suite("regex search host responsiveness (isolated process)", function () {
       .pop();
     assert.ok(line, `probe produced no report. Output: ${result.stdout}`);
     const report = JSON.parse(line) as {
-      outcome: string;
-      elapsedMs: number;
-      ticks: number;
+      allOk: boolean;
+      bodyTimeout: { ok: boolean; elapsedMs?: number; ticks?: number };
+      titleTimeout: { ok: boolean };
+      recovery: { ok: boolean };
+      newerOverlap: { ok: boolean; reason?: string };
     };
 
-    assert.strictEqual(report.outcome, "timeout", result.stdout);
+    assert.strictEqual(report.allOk, true, JSON.stringify(report));
     assert.ok(
-      report.elapsedMs < 10000,
-      `search took ${report.elapsedMs}ms, expected it near the budget`
+      (report.bodyTimeout.elapsedMs ?? Infinity) < 10000,
+      `body search took ${report.bodyTimeout.elapsedMs}ms, expected near the budget`
     );
     assert.ok(
-      report.ticks >= 10,
-      `host event loop only ticked ${report.ticks} times during the wedged search`
+      (report.bodyTimeout.ticks ?? 0) >= 10,
+      `host event loop only ticked ${report.bodyTimeout.ticks} times during the wedged search`
     );
+    assert.strictEqual(report.newerOverlap.ok, true, report.newerOverlap.reason);
   });
 });

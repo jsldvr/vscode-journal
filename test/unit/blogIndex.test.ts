@@ -8,7 +8,6 @@ import {
   DB_FILE_NAME,
   GENERATED_DIR_NAME,
   InvalidSearchPatternError,
-  RegexSearchTimeoutError,
   SNIPPET_START,
   makeLikeSnippet,
 } from "../../src/blogIndex";
@@ -485,60 +484,12 @@ suite("blogIndex", function () {
     );
   });
 
-  test("a catastrophic regex against the body is stopped and rejects with a timeout", async () => {
-    await writeEntry(
-      entriesDir,
-      "boom.md",
-      entryMarkdown("Boom", `${"a".repeat(45)}!`)
-    );
-    index = await BlogIndex.open(entriesDir);
-    await index.reconcile();
-
-    await assert.rejects(
-      index.search("(a+)+$", { useRegex: true }),
-      RegexSearchTimeoutError
-    );
-  });
-
-  test("a catastrophic regex against the title is stopped and rejects with a timeout", async () => {
-    await writeEntry(
-      entriesDir,
-      "boomtitle.md",
-      entryMarkdown(`${"a".repeat(45)}!`, "short body")
-    );
-    index = await BlogIndex.open(entriesDir);
-    await index.reconcile();
-
-    await assert.rejects(
-      index.search("(a+)+$", { useRegex: true }),
-      RegexSearchTimeoutError
-    );
-  });
-
-  test("an ordinary search still succeeds after a regex timeout, no reopen", async () => {
-    await writeEntry(
-      entriesDir,
-      "boom.md",
-      entryMarkdown("Boom", `${"a".repeat(45)}!`)
-    );
-    await writeEntry(
-      entriesDir,
-      "calm.md",
-      entryMarkdown("Calm", "an ordinary searchable body")
-    );
-    index = await BlogIndex.open(entriesDir);
-    await index.reconcile();
-
-    await assert.rejects(
-      index.search("(a+)+$", { useRegex: true }),
-      RegexSearchTimeoutError
-    );
-
-    const literal = await index.search("ordinary searchable");
-    assert.strictEqual(literal.entries.length, 1);
-    const regexAgain = await index.search("ord\\w+", { useRegex: true });
-    assert.strictEqual(regexAgain.entries.length, 1);
-  });
+  // Note: catastrophic-backtracking cases against the production
+  // BlogIndex.search path deliberately live only in
+  // test/unit/regexSearchHostProbe.test.ts, which supervises them from
+  // an outer process. Running "(a+)+$" here would hang the whole Mocha
+  // process (not just fail its test) if worker isolation ever
+  // regressed, and Mocha's same-thread timeout could not interrupt it.
 
   test("regex lookarounds and backreferences still match through the index", async () => {
     await writeEntry(

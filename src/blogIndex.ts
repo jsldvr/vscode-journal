@@ -90,6 +90,12 @@ export class BlogIndex {
   // cannot block the extension host. Created eagerly (no worker is
   // spawned until the first pattern search) and torn down by close().
   private readonly regexPool = new RegexSearchPool();
+  // Strictly increasing id assigned in search-submission order and
+  // carried into regexPool.run(). The database read in
+  // searchWithPattern can finish out of submission order, so the pool
+  // needs this to tell "newer search" from "read that happened to
+  // return last" and never let the latter cancel the former's worker.
+  private searchRequestSequence = 0;
 
   readonly entriesDir: string;
   readonly dbPath: string;
@@ -557,6 +563,9 @@ export class BlogIndex {
     query: string,
     options: SearchOptions
   ): Promise<SearchHit[]> {
+    // Assigned before the (reorderable) database read so the pool sees
+    // requests in submission order, not read-completion order.
+    const requestId = ++this.searchRequestSequence;
     const spec = buildPatternSpec(query, options);
     // Compile once on the host purely to reject an invalid pattern with
     // the friendly InvalidSearchPatternError before a worker is spawned;
@@ -574,6 +583,7 @@ export class BlogIndex {
     );
     const safeRows = rows.filter((row) => this.isSafeRelativePath(row.path));
     const hits = await this.regexPool.run({
+      id: requestId,
       rows: safeRows.map((row) => ({
         path: row.path,
         title: row.title,
