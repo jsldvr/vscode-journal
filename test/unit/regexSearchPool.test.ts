@@ -1,10 +1,12 @@
 import * as assert from "assert";
+import { Worker } from "worker_threads";
 import { buildPatternSpec } from "../../src/regexMatch";
 import {
   RegexSearchCancelledError,
   RegexSearchPool,
   RegexSearchRequest,
   RegexSearchTimeoutError,
+  regexWorkerEntryPath,
 } from "../../src/regexSearchPool";
 
 // A pattern with catastrophic backtracking against a long non-matching
@@ -29,8 +31,49 @@ function jobFor(
   };
 }
 
+interface FactoryState {
+  created: number;
+  alive: number;
+  peak: number;
+}
+
+// Instruments real worker creation and exit so the resource-bound
+// assertions observe the actual thread lifecycle rather than a proxy.
+function countingWorkerFactory(): {
+  make: () => Worker;
+  state: FactoryState;
+} {
+  const state: FactoryState = { created: 0, alive: 0, peak: 0 };
+  return {
+    state,
+    make: () => {
+      const worker = new Worker(regexWorkerEntryPath());
+      state.created++;
+      state.alive++;
+      state.peak = Math.max(state.peak, state.alive);
+      worker.once("exit", () => {
+        state.alive--;
+      });
+      return worker;
+    },
+  };
+}
+
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 10000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error("waitUntil timed out");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 suite("regexSearchPool", function () {
-  this.timeout(20000);
+  this.timeout(30000);
 
   let pool: RegexSearchPool | undefined;
 
@@ -137,11 +180,8 @@ suite("regexSearchPool", function () {
     const current = pool.run(
       jobFor(buildPatternSpec("keeper", {}), "the keeper body text", "T", 2)
     );
-    const straggler = pool.run(
-      jobFor(CATASTROPHIC, PATHOLOGICAL_BODY, "T", 1)
-    );
+    const straggler = pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY, "T", 1));
     await assert.rejects(straggler, RegexSearchCancelledError);
-    // The current run must have survived the older arrival.
     const hits = await current;
     assert.strictEqual(hits.length, 1);
     assert.strictEqual(hits[0].path, "entry.md");
@@ -176,36 +216,77 @@ suite("regexSearchPool", function () {
     pool = undefined;
   });
 
-  test("at most one worker is live under a burst, and dispose leaves none", async () => {
-    pool = new RegexSearchPool(5000);
-    const rejections: Promise<void>[] = [];
-    let peak = 0;
-    for (let i = 0; i < 10; i++) {
+  test("overlapping searches never run two workers at once, and dispose leaves none", async () => {
+    const factory = countingWorkerFactory();
+    pool = new RegexSearchPool(5000, factory.make);
+    const rejections: Promise<unknown>[] = [];
+    for (let i = 0; i < 6; i++) {
       rejections.push(
         assert.rejects(
           pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY)),
           RegexSearchCancelledError
         )
       );
-      // Yield so each supersession's terminate() can be observed.
-      await new Promise((resolve) => setImmediate(resolve));
-      peak = Math.max(peak, countRegexWorkers());
+      // Each supersession must wait for the prior worker to exit before
+      // spawning, so `created` only advances once the barrier clears.
+      await waitUntil(() => factory.state.created === i + 1);
+      assert.ok(
+        factory.state.alive <= 1,
+        `two workers alive after spawn ${i + 1}: ${factory.state.alive}`
+      );
     }
-    const last = pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY));
-    const lastAssertion = assert.rejects(last, RegexSearchCancelledError);
+    const lastRejection = assert.rejects(
+      pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY)),
+      RegexSearchCancelledError
+    );
+    await waitUntil(() => factory.state.created === 7);
 
-    // retireCurrent() awaits each terminate() before the next spawn, so
-    // the burst never stacks threads.
-    assert.ok(peak <= 2, `burst stacked ${peak} live workers`);
+    assert.strictEqual(
+      factory.state.peak,
+      1,
+      `peak concurrent workers was ${factory.state.peak}`
+    );
 
     await pool.dispose();
-    await Promise.all(rejections);
-    await lastAssertion;
-    // dispose() returns only after every worker it started has exited.
+    await Promise.all([...rejections, lastRejection]);
     assert.strictEqual(
-      countRegexWorkers(),
+      factory.state.alive,
       0,
-      "dispose returned with workers still live"
+      `${factory.state.alive} workers still alive after dispose`
+    );
+    assert.strictEqual(factory.state.created, 7);
+    pool = undefined;
+  });
+
+  test("dispose waits for the worker to exit after a run completed successfully", async () => {
+    const factory = countingWorkerFactory();
+    pool = new RegexSearchPool(2000, factory.make);
+    const hits = await pool.run(
+      jobFor(buildPatternSpec("hi", {}), "please say hi")
+    );
+    assert.strictEqual(hits.length, 1);
+    assert.strictEqual(factory.state.created, 1);
+    await pool.dispose();
+    assert.strictEqual(
+      factory.state.alive,
+      0,
+      "worker still alive after dispose following a successful run"
+    );
+    pool = undefined;
+  });
+
+  test("dispose waits for the worker to exit after a run timed out", async () => {
+    const factory = countingWorkerFactory();
+    pool = new RegexSearchPool(300, factory.make);
+    await assert.rejects(
+      pool.run(jobFor(CATASTROPHIC, PATHOLOGICAL_BODY)),
+      RegexSearchTimeoutError
+    );
+    await pool.dispose();
+    assert.strictEqual(
+      factory.state.alive,
+      0,
+      "worker still alive after dispose following a timeout"
     );
     pool = undefined;
   });
@@ -218,11 +299,3 @@ suite("regexSearchPool", function () {
     );
   });
 });
-
-// Count of live regex worker threads owned by this process. Stable
-// since Node 17; entries are resource-type strings such as "Worker".
-function countRegexWorkers(): number {
-  return process
-    .getActiveResourcesInfo()
-    .filter((entry) => entry === "Worker").length;
-}
