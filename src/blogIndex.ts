@@ -186,7 +186,11 @@ export class BlogIndex {
       this.generatedDir,
       this.dbPath
     );
-    await quarantineGeneratedFiles(this.dbPath);
+    await quarantineGeneratedFiles(
+      this.trustAnchor,
+      this.generatedDir,
+      this.dbPath
+    );
     await this.connectAndMigrate();
   }
 
@@ -957,16 +961,22 @@ function openDatabase(dbPath: string): Promise<sqlite3.Database> {
 // files under .vs-journal/ are touched, and every path is lstat-checked
 // immediately before it is moved or removed: a symlinked generated path
 // aborts recovery (EntryContainmentError) instead of following the link.
-async function quarantineGeneratedFiles(dbPath: string): Promise<void> {
+async function quarantineGeneratedFiles(
+  trustAnchor: string,
+  generatedDir: string,
+  dbPath: string
+): Promise<void> {
   const quarantinePath = `${dbPath}.corrupt`;
-  if ((await assertGeneratedFileMovable(quarantinePath)) === "safe") {
+  const movable = (target: string) =>
+    assertGeneratedFileMovable(trustAnchor, generatedDir, target);
+  if ((await movable(quarantinePath)) === "safe") {
     await fs.remove(quarantinePath).catch(() => undefined);
   }
-  if ((await assertGeneratedFileMovable(dbPath)) === "safe") {
+  if ((await movable(dbPath)) === "safe") {
     await fs.move(dbPath, quarantinePath).catch(() => fs.remove(dbPath));
   }
   for (const sidecar of [`${dbPath}-wal`, `${dbPath}-shm`]) {
-    if ((await assertGeneratedFileMovable(sidecar)) === "safe") {
+    if ((await movable(sidecar)) === "safe") {
       await fs.remove(sidecar).catch(() => undefined);
     }
   }

@@ -868,10 +868,15 @@ Write your blog entry here...
     const filePath = await createUniqueFile(entryDir, filename, content);
 
     // The freshly created path must be a regular, non-symlink file, and
-    // its chain must still be safe, before it is indexed or opened.
+    // its chain must still be safe, before it is indexed.
     await assertSafeExistingFile(anchor, filePath, "unsafe-entry");
     await index.upsertFromFile(filePath);
 
+    // upsertFromFile performs filesystem and database awaits; revalidate
+    // once more at the openTextDocument boundary so a component swapped
+    // for a link during indexing cannot make New Entry open an external
+    // file.
+    await assertSafeExistingFile(anchor, filePath, "unsafe-entry");
     const document = await vscode.workspace.openTextDocument(filePath);
     await vscode.window.showTextDocument(document);
 

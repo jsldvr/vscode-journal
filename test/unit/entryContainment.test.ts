@@ -402,21 +402,139 @@ suite("entryContainment", function () {
   });
 
   test("assertGeneratedFileMovable reports missing, safe, and rejects a link", async () => {
-    const file = path.join(root, "index.sqlite3");
-    assert.strictEqual(await assertGeneratedFileMovable(file), "missing");
+    const generated = path.join(root, "entries", ".vs-journal");
+    await fs.ensureDir(generated);
+    const file = path.join(generated, "index.sqlite3");
+    assert.strictEqual(
+      await assertGeneratedFileMovable(root, generated, file),
+      "missing"
+    );
     await fs.writeFile(file, "x");
-    assert.strictEqual(await assertGeneratedFileMovable(file), "safe");
+    assert.strictEqual(
+      await assertGeneratedFileMovable(root, generated, file),
+      "safe"
+    );
 
     const linkTarget = path.join(root, "elsewhere.sqlite3");
     await fs.writeFile(linkTarget, "x");
-    const link = path.join(root, "linked.sqlite3");
+    const link = path.join(generated, "linked.sqlite3");
     if (await tryFileLink(linkTarget, link)) {
       await assert.rejects(
-        () => assertGeneratedFileMovable(link),
+        () => assertGeneratedFileMovable(root, generated, link),
         (error: unknown) =>
           error instanceof EntryContainmentError &&
           error.kind === "unsafe-generated"
       );
+    }
+  });
+
+  test("assertGeneratedFileMovable revalidates the .vs-journal parent chain, not just the final file (stale-parent regression)", async () => {
+    const generated = path.join(root, "entries", ".vs-journal");
+    await fs.ensureDir(generated);
+    const file = path.join(generated, "index.sqlite3");
+    await fs.writeFile(file, "x");
+
+    // The final file is a genuine regular file; only its .vs-journal
+    // parent reports as a link. A guard that trusted an earlier parent
+    // check and lstat-ed only the final name would move/delete through
+    // the junction; the parent-chain revalidation must reject it.
+    const fsExtraModule = require("fs-extra");
+    const originalLstat = fsExtraModule.lstat;
+    fsExtraModule.lstat = async (target: string) => {
+      if (path.resolve(target) === path.resolve(generated)) {
+        return {
+          isSymbolicLink: () => true,
+          isFile: () => false,
+          isDirectory: () => false,
+        };
+      }
+      return originalLstat(target);
+    };
+    try {
+      await assert.rejects(
+        () => assertGeneratedFileMovable(root, generated, file),
+        (error: unknown) =>
+          error instanceof EntryContainmentError &&
+          error.kind === "unsafe-generated"
+      );
+    } finally {
+      fsExtraModule.lstat = originalLstat;
+    }
+  });
+
+  test("assertSafeGeneratedState rejects a .vs-journal swapped to a link after its own directory check (open-boundary regression)", async () => {
+    const entries = path.join(root, "entries");
+    const generated = path.join(entries, ".vs-journal");
+    await fs.ensureDir(generated);
+    const dbPath = path.join(generated, "index.sqlite3");
+
+    const fsExtraModule = require("fs-extra");
+    const originalLstat = fsExtraModule.lstat;
+    let generatedLstatCalls = 0;
+    fsExtraModule.lstat = async (target: string) => {
+      if (path.resolve(target) === path.resolve(generated)) {
+        generatedLstatCalls += 1;
+        if (generatedLstatCalls > 1) {
+          return {
+            isSymbolicLink: () => true,
+            isFile: () => false,
+            isDirectory: () => false,
+          };
+        }
+      }
+      return originalLstat(target);
+    };
+    try {
+      await assert.rejects(
+        () => assertSafeGeneratedState(root, entries, generated, dbPath),
+        (error: unknown) =>
+          error instanceof EntryContainmentError &&
+          error.kind === "unsafe-generated"
+      );
+    } finally {
+      fsExtraModule.lstat = originalLstat;
+    }
+  });
+
+  test("scan does not follow a directory swapped to a junction between enumeration and descent (stale-Dirent regression)", async () => {
+    const entries = path.join(root, "entries");
+    await writeFileDeep(path.join(entries, "2026", "real.md"));
+    const swapDir = path.join(entries, "2026", "victim");
+    await fs.ensureDir(swapDir);
+    await writeFileDeep(path.join(swapDir, "inner.md"));
+
+    const outside = path.join(root, "outside");
+    await writeFileDeep(path.join(outside, "leak.md"));
+    await writeFileDeep(path.join(outside, "deep", "leak2.md"));
+
+    // After the parent directory is enumerated, replace `victim` with a
+    // junction to an outside tree before the scan descends into it.
+    const fsExtraModule = require("fs-extra");
+    const originalReaddir = fsExtraModule.readdir;
+    const originalRemove = fsExtraModule.remove;
+    let swapped = false;
+    fsExtraModule.readdir = async (dir: string, options?: unknown) => {
+      const result = await originalReaddir(dir, options);
+      if (
+        !swapped &&
+        path.resolve(dir) === path.resolve(path.join(entries, "2026"))
+      ) {
+        swapped = true;
+        await originalRemove(swapDir);
+        await fs.symlink(outside, swapDir, "junction");
+      }
+      return result;
+    };
+    try {
+      const found = await scanContainedMarkdownFiles(entries, root, [
+        ".vs-journal",
+      ]);
+      assert.deepStrictEqual(
+        found.map((f) => f.relativePath).sort(),
+        ["2026/real.md"]
+      );
+    } finally {
+      fsExtraModule.readdir = originalReaddir;
     }
   });
 });

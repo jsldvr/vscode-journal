@@ -291,6 +291,36 @@ async function walkContained(
   ignored: Set<string>,
   found: ScannedEntryFile[]
 ): Promise<void> {
+  // Revalidate this directory with lstat immediately before reading it.
+  // The parent's readdir Dirent said it was a real directory, but a
+  // component swapped for a link or junction after that enumeration --
+  // and before this readdir -- would otherwise be followed straight out
+  // of the entries tree (and could reintroduce a traversal cycle).
+  let dirStats;
+  try {
+    dirStats = await fs.lstat(dir);
+  } catch (error) {
+    if (dir === entriesDir) {
+      throw new EntryContainmentError(
+        "unsafe-root",
+        dir,
+        `Could not verify the entries directory (${errno(error) ?? "unknown"})`
+      );
+    }
+    console.error(`VS Journal: failed to stat entry directory ${dir}:`, error);
+    return;
+  }
+  if (dirStats.isSymbolicLink() || !dirStats.isDirectory()) {
+    if (dir === entriesDir) {
+      throw new EntryContainmentError(
+        "unsafe-root",
+        dir,
+        "Entries directory is a symlink or not a directory"
+      );
+    }
+    return;
+  }
+
   let entries: Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -357,24 +387,35 @@ export async function assertSafeGeneratedState(
   generatedDir: string,
   dbPath: string
 ): Promise<void> {
+  // entriesDir must exist as a real directory. .vs-journal may be absent
+  // (created on demand) but, where present, every component from the
+  // anchor down to it must be a real, non-symlink directory -- checked
+  // as one chain rather than trusting a separate earlier stat.
   await assertSafeExistingDirectory(anchor, entriesDir, "unsafe-generated");
-  const generatedState = await statDirectory(generatedDir);
-  if (generatedState === "unsafe") {
-    throw new EntryContainmentError(
-      "unsafe-generated",
-      generatedDir,
-      "Generated index directory is a symlink or not a directory"
-    );
-  }
-  if (generatedState === "missing") {
+  const generatedChain = await verifyContainedRealDirectoryChain(
+    anchor,
+    generatedDir,
+    "unsafe-generated",
+    { allowMissingTail: true }
+  );
+  if (generatedChain.status === "missing") {
     return;
   }
   for (const file of [dbPath, `${dbPath}.corrupt`, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    await assertRegularFileOrMissing(file);
+    await assertRegularFileOrMissing(anchor, generatedDir, file);
   }
 }
 
-async function assertRegularFileOrMissing(target: string): Promise<void> {
+// Re-verifies the whole anchor -> generatedDir directory chain and then
+// lstats one generated file, with only a single await between the two.
+// A .vs-journal (or ancestor) swapped for a junction since any earlier
+// check is caught here instead of being followed as a path component.
+async function assertRegularFileOrMissing(
+  anchor: string,
+  generatedDir: string,
+  target: string
+): Promise<void> {
+  await assertSafeExistingDirectory(anchor, generatedDir, "unsafe-generated");
   let stats;
   try {
     stats = await fs.lstat(target);
@@ -397,14 +438,17 @@ async function assertRegularFileOrMissing(target: string): Promise<void> {
   }
 }
 
-// Revalidates one generated path immediately before it is moved or
-// removed by recovery. Returns "safe" when the path is a regular file,
-// "missing" when it is absent (nothing to do), and throws
-// EntryContainmentError when it is a symlink -- the caller must not touch
-// the link target.
+// Revalidates the generated directory chain and one generated path
+// immediately before it is moved or removed by recovery. Returns "safe"
+// when the path is a regular file, "missing" when it is absent (nothing
+// to do), and throws EntryContainmentError when the chain or the path
+// itself is a symlink -- the caller must not touch the link target.
 export async function assertGeneratedFileMovable(
+  anchor: string,
+  generatedDir: string,
   target: string
 ): Promise<"safe" | "missing"> {
+  await assertSafeExistingDirectory(anchor, generatedDir, "unsafe-generated");
   let stats;
   try {
     stats = await fs.lstat(target);
