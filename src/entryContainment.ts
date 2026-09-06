@@ -281,43 +281,44 @@ export async function scanContainedMarkdownFiles(
   }
   const ignored = new Set(ignoredDirNames);
   const found: ScannedEntryFile[] = [];
-  await walkContained(entriesDir, entriesDir, ignored, found);
+  await walkContained(entriesDir, anchor, entriesDir, ignored, found);
   return found;
 }
 
 async function walkContained(
   entriesDir: string,
+  anchor: string,
   dir: string,
   ignored: Set<string>,
   found: ScannedEntryFile[]
 ): Promise<void> {
-  // Revalidate this directory with lstat immediately before reading it.
-  // The parent's readdir Dirent said it was a real directory, but a
-  // component swapped for a link or junction after that enumeration --
-  // and before this readdir -- would otherwise be followed straight out
-  // of the entries tree (and could reintroduce a traversal cycle).
-  let dirStats;
+  // Revalidate the COMPLETE anchor -> dir chain immediately before every
+  // readdir, not just dir's own final component. lstat/readdir follow
+  // intermediate symlinks, so an ancestor swapped for a junction after
+  // its own enumeration (e.g. .../2026/x replaced while descending into
+  // .../2026/x/deep) would otherwise be walked straight out of the
+  // entries tree. Re-walking the whole chain each frame catches that; a
+  // directory-link cycle still cannot recurse because the linked
+  // component fails the chain check.
   try {
-    dirStats = await fs.lstat(dir);
+    await verifyContainedRealDirectoryChain(anchor, dir, "unsafe-root", {
+      allowMissingTail: false,
+    });
   } catch (error) {
     if (dir === entriesDir) {
+      if (error instanceof EntryContainmentError) {
+        throw error;
+      }
       throw new EntryContainmentError(
         "unsafe-root",
         dir,
         `Could not verify the entries directory (${errno(error) ?? "unknown"})`
       );
     }
-    console.error(`VS Journal: failed to stat entry directory ${dir}:`, error);
-    return;
-  }
-  if (dirStats.isSymbolicLink() || !dirStats.isDirectory()) {
-    if (dir === entriesDir) {
-      throw new EntryContainmentError(
-        "unsafe-root",
-        dir,
-        "Entries directory is a symlink or not a directory"
-      );
-    }
+    console.error(
+      `VS Journal: skipping unverifiable entry directory ${dir}:`,
+      error
+    );
     return;
   }
 
@@ -348,6 +349,7 @@ async function walkContained(
       }
       await walkContained(
         entriesDir,
+        anchor,
         path.join(dir, entry.name),
         ignored,
         found
@@ -359,10 +361,12 @@ async function walkContained(
     }
     const entryPath = path.join(dir, entry.name);
     try {
+      // Re-validate the full parent chain and the final file together:
+      // an ancestor swapped for a junction after this directory was
+      // enumerated must not let a stale Dirent be lstat-ed through the
+      // link into an external file.
+      await assertSafeExistingFile(anchor, entryPath, "unsafe-root");
       const stats = await fs.lstat(entryPath);
-      if (stats.isSymbolicLink() || !stats.isFile()) {
-        continue;
-      }
       found.push({
         absolutePath: entryPath,
         relativePath: normalizeEntryPath(path.relative(entriesDir, entryPath)),
@@ -370,7 +374,7 @@ async function walkContained(
         size: stats.size,
       });
     } catch (error) {
-      console.error(`VS Journal: failed to stat entry ${entryPath}:`, error);
+      console.error(`VS Journal: skipping unverifiable entry ${entryPath}:`, error);
     }
   }
 }

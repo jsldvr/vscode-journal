@@ -105,17 +105,142 @@ suite("Entry symlink containment", function () {
     }
   });
 
-  test("New Entry still creates and indexes an ordinary contained entry", async () => {
+  async function findEntryFile(slug: string): Promise<string | undefined> {
+    const stack = [entriesDir()];
+    while (stack.length > 0) {
+      const dir = stack.pop() as string;
+      let names: string[];
+      try {
+        names = await fs.readdir(dir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        const full = path.join(dir, name);
+        const stat = await fs.lstat(full).catch(() => undefined);
+        if (!stat) {
+          continue;
+        }
+        if (stat.isDirectory() && name !== ".vs-journal") {
+          stack.push(full);
+        } else if (stat.isFile() && name === `${slug}.md`) {
+          return full;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  test("New Entry drives the command to create and index an ordinary contained entry", async () => {
+    await activateExtension();
+    // Alphanumeric only: createNewEntry strips non-alphanumerics from the
+    // title to form the filename, so the slug must survive that as-is.
+    const slug = `accnormalentry${Date.now()}`;
+    const originalInput = vscode.window.showInputBox;
+    (vscode.window as unknown as { showInputBox: unknown }).showInputBox =
+      async () => slug;
+    try {
+      await vscode.commands.executeCommand("vsJournal.newEntry");
+      const created = await waitFor(
+        async () => (await findEntryFile(slug)) !== undefined,
+        10000
+      );
+      assert.strictEqual(created, true, "New Entry should create the .md file");
+      const found = await findEntryFile(slug);
+      assert.ok(found && (await fs.lstat(found)).isFile());
+    } finally {
+      (vscode.window as unknown as { showInputBox: unknown }).showInputBox =
+        originalInput;
+      const found = await findEntryFile(slug);
+      if (found) {
+        await fs.remove(found).catch(() => undefined);
+      }
+      await vscode.commands
+        .executeCommand("vsJournal.rescanEntries")
+        .then(undefined, () => undefined);
+    }
+  });
+
+  test("New Entry does not open the created file if its path turns unsafe after indexing (F3 boundary regression)", async () => {
     await activateExtension();
 
-    const before = await fs.readdir(entriesDir());
-    // newEntry shows an input box; drive it through the command with a
-    // stubbed prompt is not available here, so assert the command is
-    // registered and resolves. The dedicated unit suite covers the
-    // create/collision path deterministically.
-    const commands = await vscode.commands.getCommands(true);
-    assert.ok(commands.includes("vsJournal.newEntry"));
-    assert.ok(Array.isArray(before));
+    // The running extension loads its own copy of blogIndex from out/,
+    // so it cannot be patched from here. fs-extra is a shared singleton,
+    // so drive the boundary through lstat instead: createNewEntry lstats
+    // the new file exactly once per assertSafeExistingFile call, in this
+    // order -- (1) pre-index guard, (2) upsertFromFile's entry guard,
+    // (3) upsertFromFile's Promise.all stat, (4) upsertFromFile's
+    // pre-commit re-check, (5) the F3 guard that must run between
+    // indexing and openTextDocument. Reporting the file as a link on
+    // call 5 makes the F3 guard throw; with the F3 line removed there is
+    // no call 5, so openTextDocument would be reached -- the assertion
+    // fails, which is the regression signal.
+    const fsExtraModule = require("fs-extra");
+    const originalLstat = fsExtraModule.lstat;
+    const originalInput = vscode.window.showInputBox;
+    const originalOpenDoc = vscode.workspace.openTextDocument;
+
+    const slug = `accf3boundary${Date.now()}`;
+    let fileLstatCalls = 0;
+    const openedPaths: string[] = [];
+
+    fsExtraModule.lstat = async (target: string) => {
+      if (
+        typeof target === "string" &&
+        target.toLowerCase().includes(slug) &&
+        target.endsWith(".md")
+      ) {
+        fileLstatCalls += 1;
+        if (fileLstatCalls >= 5) {
+          return {
+            isSymbolicLink: () => true,
+            isFile: () => false,
+            isDirectory: () => false,
+          };
+        }
+      }
+      return originalLstat(target);
+    };
+    (vscode.window as unknown as { showInputBox: unknown }).showInputBox =
+      async () => slug;
+    (
+      vscode.workspace as unknown as { openTextDocument: unknown }
+    ).openTextDocument = async (arg: unknown) => {
+      const asPath =
+        typeof arg === "string"
+          ? arg
+          : (arg as { fsPath?: string })?.fsPath ?? String(arg);
+      openedPaths.push(asPath);
+      return originalOpenDoc.call(vscode.workspace, arg as never);
+    };
+
+    try {
+      await vscode.commands.executeCommand("vsJournal.newEntry");
+      assert.ok(
+        fileLstatCalls >= 5,
+        `expected the F3 guard to lstat the new file (calls=${fileLstatCalls}); the boundary or call count changed`
+      );
+      assert.ok(
+        !openedPaths.some((p) => p.toLowerCase().includes(slug)),
+        `openTextDocument must not be called for the unsafe new entry; opened: ${JSON.stringify(
+          openedPaths
+        )}`
+      );
+    } finally {
+      fsExtraModule.lstat = originalLstat;
+      (vscode.window as unknown as { showInputBox: unknown }).showInputBox =
+        originalInput;
+      (
+        vscode.workspace as unknown as { openTextDocument: unknown }
+      ).openTextDocument = originalOpenDoc;
+      const found = await findEntryFile(slug);
+      if (found) {
+        await fs.remove(found).catch(() => undefined);
+      }
+      await vscode.commands
+        .executeCommand("vsJournal.rescanEntries")
+        .then(undefined, () => undefined);
+    }
   });
 
   test("activation left the real sample entry indexed and searchable", async () => {

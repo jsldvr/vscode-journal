@@ -537,4 +537,52 @@ suite("entryContainment", function () {
       fsExtraModule.readdir = originalReaddir;
     }
   });
+
+  test("scan does not follow an ANCESTOR swapped to a junction after its own enumeration, while descending into a deeper child (ancestor-swap regression)", async () => {
+    const entries = path.join(root, "entries");
+    await writeFileDeep(path.join(entries, "2026", "real.md"));
+    // A real victim dir with a real deeper child, so the Dirent for
+    // `deep` is captured before the swap.
+    const victim = path.join(entries, "2026", "victim");
+    await fs.ensureDir(path.join(victim, "deep"));
+    await writeFileDeep(path.join(victim, "deep", "inner.md"));
+
+    // The outside tree the junction points at also has a `deep/leak.md`,
+    // so following the swapped ancestor would surface an external file.
+    const outside = path.join(root, "outside");
+    await writeFileDeep(path.join(outside, "deep", "leak.md"));
+
+    const fsExtraModule = require("fs-extra");
+    const originalReaddir = fsExtraModule.readdir;
+    const originalRemove = fsExtraModule.remove;
+    let swapped = false;
+    fsExtraModule.readdir = async (dir: string, options?: unknown) => {
+      const result = await originalReaddir(dir, options);
+      // Swap `victim` only after ITS OWN contents are enumerated, i.e.
+      // once its chain check has already passed and the scan is about to
+      // descend into victim/deep.
+      if (!swapped && path.resolve(dir) === path.resolve(victim)) {
+        swapped = true;
+        await originalRemove(victim);
+        await fs.symlink(outside, victim, "junction");
+      }
+      return result;
+    };
+    try {
+      const found = await scanContainedMarkdownFiles(entries, root, [
+        ".vs-journal",
+      ]);
+      // The external file under the swapped junction (2026/victim/deep/
+      // leak.md) must never appear. The formerly real 2026/victim/deep/
+      // inner.md is conservatively dropped too: its ancestor is no longer
+      // a real directory, so the scan fails closed and reconcile prunes
+      // the stale rows.
+      assert.deepStrictEqual(
+        found.map((f) => f.relativePath).sort(),
+        ["2026/real.md"]
+      );
+    } finally {
+      fsExtraModule.readdir = originalReaddir;
+    }
+  });
 });
