@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-09-05
+
 ### Fixed
 
 - Changing `vsJournal.blogPath` while the entry index was still opening for
