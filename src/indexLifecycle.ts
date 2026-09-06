@@ -15,10 +15,11 @@
 //   - Callers sharing a generation share the one in-flight open.
 //   - A failed open (or an unresolvable target) leaves the host able to
 //     retry with no stale pending state cached.
-//   - Disposal is terminal and idempotent: it awaits every open still in
-//     flight -- including ones already superseded -- and every owned
-//     close, and no later `ensure()` can start another open or resurrect
-//     index state.
+//   - Disposal is terminal and idempotent: it detaches the active index
+//     synchronously (get() is undefined the instant it is called), then
+//     awaits every open still in flight -- including ones already
+//     superseded -- and every owned close, and no later `ensure()` can
+//     start another open or resurrect index state.
 //
 // It is deliberately free of `vscode` imports so the lifecycle logic can
 // be exercised directly by the unit suite with deferred fakes.
@@ -201,7 +202,10 @@ export class IndexLifecycle<TIndex> {
     return settle(closed).then(() => undefined);
   }
 
-  // Terminal and idempotent. Awaits every open still in flight (each
+  // Terminal and idempotent. Detaches the active index synchronously so
+  // get() returns undefined the instant dispose() is called -- no
+  // startup or configuration continuation can still see it as current
+  // after its awaits. Then awaits every open still in flight (each
   // self-closes when it resolves for a disposed host) and every owned
   // close, then refuses all further work.
   dispose(): Promise<void> {
@@ -210,16 +214,16 @@ export class IndexLifecycle<TIndex> {
     }
     this.disposed = true;
     this.generation++;
-    this.disposal = this.runDispose();
-    return this.disposal;
-  }
-
-  private async runDispose(): Promise<void> {
     this.pending = undefined;
-    await this.drain(this.inFlight);
     const previous = this.current;
     this.current = undefined;
     this.currentGeneration = -1;
+    this.disposal = this.runDispose(previous);
+    return this.disposal;
+  }
+
+  private async runDispose(previous: TIndex | undefined): Promise<void> {
+    await this.drain(this.inFlight);
     if (previous) {
       this.retain(this.cleanups, this.deps.close(previous));
     }

@@ -365,21 +365,11 @@ suite("IndexLifecycle", () => {
     assert.strictEqual(life.get(), idx);
   });
 
-  test("ensure(true) still escalates after an unresolvable passive open", async () => {
-    const h = new Harness();
-    h.target = undefined;
-    const life = new IndexLifecycle<FakeIndex>(h.deps());
-    assert.strictEqual(await life.ensure(false), undefined);
-
-    h.target = "A";
-    const created = life.ensure(true);
-    await flush();
-    assert.strictEqual(h.openCalls.length, 1);
-    assert.strictEqual(h.openCalls[0].createTargetDir, true);
-    const idx: FakeIndex = { id: "A" };
-    h.openCalls[0].gate.resolve(idx);
-    assert.strictEqual(await created, idx);
-  });
+  // The ensure(true) escalation path after an unresolvable passive open
+  // would spin the microtask queue forever against a regressed
+  // implementation, and a same-thread Mocha timeout could not interrupt
+  // it. That case runs in a forked process with an outer SIGKILL
+  // deadline instead: see indexLifecycleProbe.test.ts.
 
   test("disposal awaits a superseded pending open and its close", async () => {
     const h = new Harness();
@@ -403,6 +393,10 @@ suite("IndexLifecycle", () => {
     const disposal = life.dispose().then(() => {
       done = true;
     });
+    // The active index is detached synchronously: no post-dispose
+    // continuation can still observe it as current.
+    assert.strictEqual(life.get(), undefined, "get() is undefined the instant dispose() is called");
+    assert.strictEqual(life.isDisposed(), true);
     await flush();
     assert.strictEqual(done, false, "dispose must not resolve while A is still opening");
 
