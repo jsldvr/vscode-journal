@@ -165,6 +165,30 @@ if you choose the action. If index files were already committed, an ignore
 rule does not untrack them; untrack them manually (for example
 `git rm -r --cached blog/entries/.vs-journal`).
 
+## Entry path safety
+
+The workspace root is the trust anchor. Every path the entry subsystem
+touches below it -- the configured blog and `entries` directories, the
+generated `entries/.vs-journal/` directory, `index.sqlite3` and its
+`.corrupt`/`-wal`/`-shm` siblings, every dated subdirectory, and every
+entry `.md` file -- must be a real, non-symlink path of the expected type.
+A symbolic link or Windows junction anywhere on the path is rejected, even
+when its target stays inside the workspace: linked entry trees are
+unsupported, not resolved.
+
+Concretely: entry scanning never follows a linked file or directory and
+cannot be led into a directory-link cycle; startup reconciliation drops
+index rows for a previously real subtree that has been replaced by a link;
+and creating, indexing, opening, or rebuilding an entry revalidates the
+physical path immediately before it acts. An unsafe configured root, an
+unsafe entry, and an unsafe generated database path each report a
+distinct, actionable error and no external file is read or written. Passive
+activation never creates missing directories; `New Blog Entry` and the
+blog-path setup flow create them deliberately and revalidate each one.
+These checks use portable Node filesystem APIs: they stop stable links and
+close the practical check/use gap, but they do not claim freedom from an
+adversarial filesystem race.
+
 ## Usage
 
 1. Use `Ctrl+Shift+P` and search for "Journal: New Blog Entry"
@@ -175,7 +199,9 @@ rule does not untrack them; untrack them manually (for example
 ## Configuration
 
 - `vsJournal.blogPath`: Path to blog directory, relative to the workspace
-  root (default: "./blog")
+  root (default: "./blog"). Must stay within the workspace and resolve
+  through real directories; a symlinked or junctioned path is rejected
+  (see "Entry path safety").
 - `vsJournal.mediaPath`: Path to the media directory, relative to the
   configured blog directory (default: "media"). Must stay within the blog
   directory; absolute or escaping values are ignored. Change it with

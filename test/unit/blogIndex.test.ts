@@ -11,6 +11,7 @@ import {
   SNIPPET_START,
   makeLikeSnippet,
 } from "../../src/blogIndex";
+import { EntryContainmentError } from "../../src/entryContainment";
 
 async function makeEntriesDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-index-"));
@@ -58,7 +59,7 @@ suite("blogIndex", function () {
   });
 
   test("initial open creates the schema at the current user_version", async () => {
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     assert.strictEqual(await index.userVersion(), 2);
     const meta = await index.get<{ value: string }>(
       "SELECT value FROM meta WHERE key = 'fts_tokenizer'"
@@ -71,7 +72,7 @@ suite("blogIndex", function () {
     await fs.ensureDir(path.dirname(dbPath));
     await createV1Database(dbPath);
 
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     assert.strictEqual(await index.userVersion(), 2);
 
     // The migration backfills FTS from existing rows, so the v1 row is
@@ -87,7 +88,7 @@ suite("blogIndex", function () {
       "2026/07/24/first.md",
       entryMarkdown("First", "The quick brown fox.", ["alpha"])
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
     assert.strictEqual(await index.countEntries(), 1);
     const entries = await index.listEntries();
@@ -112,7 +113,7 @@ suite("blogIndex", function () {
       entryMarkdown("Remove", "doomed body")
     );
 
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
     assert.strictEqual(await index.countEntries(), 3);
     const before = await index.get<{ id: number; body: string }>(
@@ -150,7 +151,7 @@ suite("blogIndex", function () {
       path.join("2026", "07", "24", "nested.md"),
       entryMarkdown("Nested", "content")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const entries = await index.listEntries();
@@ -161,7 +162,7 @@ suite("blogIndex", function () {
   });
 
   test("indexing a file outside the entries directory is rejected", async () => {
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     const outside = path.join(entriesDir, "..", "outside.md");
     await fs.writeFile(outside, entryMarkdown("Evil", "outside"));
     try {
@@ -174,7 +175,7 @@ suite("blogIndex", function () {
   });
 
   test("paths read from the database are guarded before resolution", async () => {
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.run(
       `INSERT INTO entries (path, title, date, body, mtime_ms, size_bytes)
        VALUES ('../../escape.md', 'Escape', '2026-01-01 00:00:00', 'body', 0, 0)`
@@ -187,7 +188,7 @@ suite("blogIndex", function () {
   });
 
   test("a failed transaction rolls back entry, tag, and FTS changes together", async () => {
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await assert.rejects(() =>
       (index as BlogIndex).runInTransactionForTest(async () => {
         await (index as BlogIndex).run(
@@ -208,7 +209,7 @@ suite("blogIndex", function () {
   });
 
   test("entry create, update, rename, and delete keep metadata, tags, and FTS consistent", async () => {
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
 
     const created = await writeEntry(
       entriesDir,
@@ -248,7 +249,7 @@ suite("blogIndex", function () {
   });
 
   test("rebuildAll replaces the whole index from Markdown, dropping rows with no backing file", async () => {
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.run(
       `INSERT INTO entries (path, title, date, body, mtime_ms, size_bytes)
        VALUES ('ghost.md', 'Ghost', '2026-01-01 00:00:00', 'ghost body', 0, 0)`
@@ -264,7 +265,7 @@ suite("blogIndex", function () {
 
   test("a watcher update issued during a rescan applies after it and is not overwritten", async () => {
     await writeEntry(entriesDir, "a.md", entryMarkdown("A", "alpha body"));
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const watched = await writeEntry(
@@ -289,7 +290,7 @@ suite("blogIndex", function () {
     await fs.writeFile(dbPath, "this is definitely not a sqlite database");
     await writeEntry(entriesDir, "ok.md", entryMarkdown("Ok", "healthy body"));
 
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     assert.strictEqual(await index.countEntries(), 1);
@@ -298,13 +299,13 @@ suite("blogIndex", function () {
   });
 
   test("a database written by a newer schema version is treated as incompatible and rebuilt", async () => {
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.run("PRAGMA user_version=99");
     await index.close();
     index = undefined;
 
     await writeEntry(entriesDir, "new.md", entryMarkdown("New", "fresh body"));
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
     assert.strictEqual(await index.userVersion(), 2);
     assert.strictEqual(await index.countEntries(), 1);
@@ -322,8 +323,8 @@ suite("blogIndex", function () {
       entryMarkdown("Two", "second connection body")
     );
 
-    index = await BlogIndex.open(entriesDir);
-    const other = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
+    const other = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     try {
       await Promise.all([
         index.upsertFromFile(first),
@@ -347,7 +348,7 @@ suite("blogIndex", function () {
       "b.md",
       entryMarkdown("Plain Title", "deep in the body a kumquat appears", [])
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const result = await index.search("kumquat");
@@ -373,7 +374,7 @@ suite("blogIndex", function () {
       "q.md",
       entryMarkdown("Quick", "The quick brown fox jumps")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     assert.strictEqual((await index.search("uick")).entries.length, 1);
@@ -386,7 +387,7 @@ suite("blogIndex", function () {
       "p.md",
       entryMarkdown("Punct", 'It doesn\'t "just work": (usually) 100%')
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     assert.strictEqual((await index.search('doesn\'t "just work"')).entries.length, 1);
@@ -399,7 +400,7 @@ suite("blogIndex", function () {
       "s.md",
       entryMarkdown("Short", "contains the rare zq digraph")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const result = await index.search("zq");
@@ -413,7 +414,7 @@ suite("blogIndex", function () {
       "q.md",
       entryMarkdown("Quick", "The quick brown fox jumps")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const withoutOptions = await index.search("QUICK BROWN");
@@ -428,7 +429,7 @@ suite("blogIndex", function () {
       "c.md",
       entryMarkdown("Casing", "The Word appears once, lowercase word appears too")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const caseSensitive = await index.search("Word", { matchCase: true });
@@ -447,7 +448,7 @@ suite("blogIndex", function () {
       "w.md",
       entryMarkdown("Category", "a category of things, not just cat")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const whole = await index.search("cat", { wholeWord: true });
@@ -463,7 +464,7 @@ suite("blogIndex", function () {
       "r.md",
       entryMarkdown("Regexy", "order numbers like ord-123 and ord-456")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const result = await index.search("ord-\\d+", { useRegex: true });
@@ -475,7 +476,7 @@ suite("blogIndex", function () {
   });
 
   test("an invalid regex pattern rejects with InvalidSearchPatternError instead of throwing a raw SyntaxError", async () => {
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     await assert.rejects(
@@ -497,7 +498,7 @@ suite("blogIndex", function () {
       "look.md",
       entryMarkdown("Look", "the total is 128 units and hello hello there")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const lookaround = await index.search("(?<=is )\\d+", { useRegex: true });
@@ -514,7 +515,7 @@ suite("blogIndex", function () {
       "zero.md",
       entryMarkdown("Zero", "plain body with no special structure")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const result = await index.search("x*", { useRegex: true });
@@ -528,7 +529,7 @@ suite("blogIndex", function () {
       "cw.md",
       entryMarkdown("Combined", "match cat but not category or concatenate")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const result = await index.search("c.t", {
@@ -544,7 +545,7 @@ suite("blogIndex", function () {
       "m.md",
       entryMarkdown("Malformed", "plain body text")
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const hostile = [
@@ -572,7 +573,7 @@ suite("blogIndex", function () {
       "f.md",
       `---\ntitle: Fm Test\ndate: 2026-07-24 10:00:00\ntags: [normal]\ndraft: xyzzysecret\n---\n\nVisible body only.\n`
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     assert.strictEqual((await index.search("xyzzysecret")).entries.length, 0);
@@ -590,7 +591,7 @@ suite("blogIndex", function () {
       "tag2.md",
       entryMarkdown("Untagged", "alpha appears in body but not tags", [])
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const result = await index.search("tag:alpha");
@@ -606,7 +607,7 @@ suite("blogIndex", function () {
     await fs.writeFile(mapPath, legacyContent);
     await writeEntry(entriesDir, "real.md", entryMarkdown("Real", "real body"));
 
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     assert.strictEqual(await index.countEntries(), 1);
@@ -628,7 +629,7 @@ suite("blogIndex", function () {
       "2026/03/15/astro.md",
       `---\ntitle: Astro\npubDate: 2026-03-15 08:30:00\ntags: [astro]\n---\n\nAstro body.\n`
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const entries = await index.listEntries();
@@ -643,7 +644,7 @@ suite("blogIndex", function () {
       "2026/07/24/both.md",
       `---\ntitle: Both\ndate: 2026-07-24 10:00:00\npubDate: 2026-03-15 08:30:00\ntags: []\n---\n\nBoth body.\n`
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const entries = await index.listEntries();
@@ -666,7 +667,7 @@ suite("blogIndex", function () {
       "2026/09/09/newest.md",
       `---\ntitle: Newest\npubDate: 2026-09-09 00:00:00\ntags: []\n---\n\nNewest.\n`
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const titles = (await index.listEntries()).map((entry) => entry.title);
@@ -679,7 +680,7 @@ suite("blogIndex", function () {
       "2026/07/24/undated.md",
       `---\ntitle: Undated\ntags: []\n---\n\nUndated body.\n`
     );
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.reconcile();
 
     const entries = await index.listEntries();
@@ -734,3 +735,171 @@ function createV1Database(dbPath: string): Promise<void> {
     });
   });
 }
+
+// -- symlink / junction containment -------------------------------------
+
+async function tryDirLink(target: string, linkPath: string): Promise<boolean> {
+  try {
+    await fs.symlink(target, linkPath, "junction");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function tryFileLink(target: string, linkPath: string): Promise<boolean> {
+  try {
+    await fs.symlink(target, linkPath, "file");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+suite("blogIndex symlink containment", function () {
+  this.timeout(20000);
+
+  let root: string;
+  let entries: string;
+  let index: BlogIndex | undefined;
+
+  setup(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "vs-journal-index-sym-"));
+    entries = path.join(root, "blog", "entries");
+    await fs.ensureDir(entries);
+    index = undefined;
+  });
+
+  teardown(async () => {
+    await index?.close();
+    index = undefined;
+    await fs.remove(root).catch(() => undefined);
+  });
+
+  test("BlogIndex.open rejects a junctioned .vs-journal without creating artifacts in its target", async () => {
+    const outside = path.join(root, "outside");
+    await fs.ensureDir(outside);
+    assert.ok(
+      await tryDirLink(outside, path.join(entries, GENERATED_DIR_NAME)),
+      "directory junction creation is required for this test"
+    );
+
+    await assert.rejects(
+      () => BlogIndex.open(entries, root),
+      (error: unknown) =>
+        error instanceof EntryContainmentError &&
+        error.kind === "unsafe-generated"
+    );
+    assert.strictEqual(
+      await fs.pathExists(path.join(outside, DB_FILE_NAME)),
+      false,
+      "no database artifact may be written into the junction target"
+    );
+  });
+
+  test("BlogIndex.open rejects a symlinked database file (fs fake for the link)", async () => {
+    const dbPath = path.join(entries, GENERATED_DIR_NAME, DB_FILE_NAME);
+    const fsExtraModule = require("fs-extra");
+    const originalLstat = fsExtraModule.lstat;
+    fsExtraModule.lstat = async (target: string) => {
+      if (target === dbPath) {
+        return {
+          isSymbolicLink: () => true,
+          isFile: () => false,
+          isDirectory: () => false,
+        };
+      }
+      return originalLstat(target);
+    };
+    try {
+      await assert.rejects(
+        () => BlogIndex.open(entries, root),
+        (error: unknown) =>
+          error instanceof EntryContainmentError &&
+          error.kind === "unsafe-generated"
+      );
+    } finally {
+      fsExtraModule.lstat = originalLstat;
+    }
+  });
+
+  test("upsertFromFile refuses a file reached through a junctioned ancestor and never reads the target", async () => {
+    index = await BlogIndex.open(entries, root);
+
+    const outside = path.join(root, "outside");
+    await fs.ensureDir(outside);
+    await fs.writeFile(
+      path.join(outside, "secret.md"),
+      "---\ntitle: Secret\ndate: 2026-07-24 09:00:00\ntags: []\n---\n\nsecret body\n"
+    );
+    assert.ok(await tryDirLink(outside, path.join(entries, "2026")));
+
+    await assert.rejects(
+      () => index!.upsertFromFile(path.join(entries, "2026", "secret.md")),
+      (error: unknown) => error instanceof EntryContainmentError
+    );
+    assert.strictEqual(await index.countEntries(), 0);
+  });
+
+  test("upsertFromFile refuses a symlinked final entry file where file links are supported", async () => {
+    index = await BlogIndex.open(entries, root);
+    const target = path.join(root, "target.md");
+    await fs.writeFile(
+      target,
+      "---\ntitle: T\ndate: 2026-07-24 09:00:00\ntags: []\n---\n\nbody\n"
+    );
+    const link = path.join(entries, "2026", "07", "linked.md");
+    await fs.ensureDir(path.dirname(link));
+    if (!(await tryFileLink(target, link))) {
+      return;
+    }
+    await assert.rejects(
+      () => index!.upsertFromFile(link),
+      (error: unknown) => error instanceof EntryContainmentError
+    );
+    assert.strictEqual(await index.countEntries(), 0);
+  });
+
+  test("reconcile prunes rows for a formerly real subtree that becomes a junction", async () => {
+    const monthDir = path.join(entries, "2026", "07");
+    await fs.ensureDir(monthDir);
+    await fs.writeFile(
+      path.join(monthDir, "kept.md"),
+      "---\ntitle: Kept\ndate: 2026-07-24 09:00:00\ntags: []\n---\n\nkept\n"
+    );
+    await fs.ensureDir(path.join(entries, "2026", "08"));
+    await fs.writeFile(
+      path.join(entries, "2026", "08", "gone.md"),
+      "---\ntitle: Gone\ndate: 2026-08-01 09:00:00\ntags: []\n---\n\ngone\n"
+    );
+
+    index = await BlogIndex.open(entries, root);
+    await index.reconcile();
+    assert.strictEqual(await index.countEntries(), 2);
+
+    // Replace the real 2026/08 subtree with a junction to an outside dir.
+    await fs.remove(path.join(entries, "2026", "08"));
+    const outside = path.join(root, "outside");
+    await fs.ensureDir(outside);
+    await fs.writeFile(
+      path.join(outside, "gone.md"),
+      "---\ntitle: Gone\ndate: 2026-08-01 09:00:00\ntags: []\n---\n\ngone\n"
+    );
+    assert.ok(await tryDirLink(outside, path.join(entries, "2026", "08")));
+
+    await index.reconcile();
+    const titles = (await index.listEntries()).map((e) => e.title);
+    assert.deepStrictEqual(titles, ["Kept"]);
+  });
+
+  test("reconcile still indexes an ordinary nested tree", async () => {
+    await fs.ensureDir(path.join(entries, "2026", "07", "24"));
+    await fs.writeFile(
+      path.join(entries, "2026", "07", "24", "a.md"),
+      "---\ntitle: A\ndate: 2026-07-24 09:00:00\ntags: [x]\n---\n\nalpha\n"
+    );
+    index = await BlogIndex.open(entries, root);
+    await index.reconcile();
+    assert.strictEqual(await index.countEntries(), 1);
+  });
+});

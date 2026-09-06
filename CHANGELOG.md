@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Security
+
+- Journal entry operations now fail closed on symbolic links and Windows
+  junctions anywhere below the workspace root. The configured blog and
+  entries directories, the generated `.vs-journal` directory, the
+  `index.sqlite3` database and its `.corrupt`/`-wal`/`-shm` siblings, every
+  entry subdirectory, and every entry file must be a real, non-symlink
+  path of the expected type; a link is rejected even when its target stays
+  inside the workspace. Entry scanning no longer follows linked files or
+  directories and cannot be sent into a directory-link cycle, activation
+  reconciliation prunes rows for a previously real subtree that has been
+  replaced by a link, and the file watcher, "Rescan All Entries", entry
+  opening, and "New Blog Entry" all revalidate the physical path
+  immediately before they read, write, open, index, move, or delete.
+  Passive activation still never creates missing directories; deliberate
+  creation flows validate each parent and revalidate each component they
+  create. Linked entry trees remain unsupported rather than resolved.
+
 ## [1.3.2] - 2026-09-05
 
 ### Fixed

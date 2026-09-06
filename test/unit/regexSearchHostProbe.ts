@@ -38,7 +38,7 @@ async function withIndex<T>(
         entryMarkdown(entry.title, entry.body)
       );
     }
-    const index = await BlogIndex.open(dir);
+    const index = await BlogIndex.open(dir, path.dirname(dir));
     await index.reconcile();
     try {
       return await fn(index);
