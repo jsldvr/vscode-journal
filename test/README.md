@@ -43,7 +43,9 @@ suites.
 A single aggregate job named **`CI Required`** depends on all three. It runs
 with `always()` and fails unless every dependency reports `success`, so a
 failed, skipped, or cancelled dependency fails it too. `CI Required` is the
-only status check the `main` branch ruleset needs to require.
+only status check the `main` branch ruleset needs to require; that ruleset
+change is prepared in `.github/rulesets/main-branch-required-check.json` but
+is not yet applied, so CI is currently advisory.
 
 `.github/workflows/release.yml` runs the same stable QA contract
 (`release:check`) plus the `1.125.0` acceptance suite before any VSIX is

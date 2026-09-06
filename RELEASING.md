@@ -7,11 +7,14 @@ builds every supported VSIX, and publishes the GitHub release. It does not
 publish to the VS Code Marketplace; Marketplace publication remains
 separately authorized and is not automated by this workflow.
 
-Pull requests are gated separately by `.github/workflows/ci.yml`. Its single
-aggregate job **`CI Required`** covers the full QA gate, acceptance against
-both the minimum (`1.125.0`) and current stable VS Code, and the
-seven-target package matrix; it is the only status check the `main` branch
-ruleset needs to require.
+Pull requests run `.github/workflows/ci.yml`, whose single aggregate job
+**`CI Required`** covers the full QA gate, acceptance against both the
+minimum (`1.125.0`) and current stable VS Code, and the seven-target package
+matrix. `CI Required` is the only context the `main` branch ruleset needs to
+require. That ruleset change is prepared in
+`.github/rulesets/main-branch-required-check.json` but has not been applied,
+so a failing CI run does not block merging yet; once the ruleset requires
+`CI Required`, it will.
 
 Replace `X.Y.Z` in every command with the intended semantic version. Valid
 prerelease versions such as `1.0.1-rc-1` and `1.0.1-beta` are supported.
