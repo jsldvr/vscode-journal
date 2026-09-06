@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-09-05
+
+### Fixed
+
+- Changing `vsJournal.blogPath` while the entry index was still opening for
+  the previous directory could leave the old index active: the in-flight
+  open published its result without checking that the configuration still
+  pointed at that directory, so the host served directory A's index under
+  configuration B, and a subsequent New Entry could be written into the old
+  directory. Index open/reopen/dispose are now serialized by generation
+  ownership: only the current configuration's open can become the active
+  index, every index opened for a superseded configuration is closed, a
+  failed open can be retried, and deactivation is terminal and idempotent --
+  it awaits the in-flight open and every owned close and no later call can
+  reopen. Startup and configuration-change continuations re-check ownership
+  after their awaits before rebinding watchers or refreshing views. New
+  Entry now always acquires the current directory's index; passive startup
+  still never creates an absent blog directory, and New Entry still
+  escalates to create it on demand.
+
 ## [1.3.1] - 2026-09-05
 
 ### Fixed

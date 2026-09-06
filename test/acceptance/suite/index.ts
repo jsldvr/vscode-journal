@@ -8,6 +8,7 @@ export function run(): Promise<void> {
   });
 
   mocha.addFile(path.resolve(__dirname, "extension.test.js"));
+  mocha.addFile(path.resolve(__dirname, "indexLifecycle.test.js"));
   mocha.addFile(path.resolve(__dirname, "media.test.js"));
   mocha.addFile(path.resolve(__dirname, "regexSearch.test.js"));
 
