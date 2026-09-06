@@ -45,7 +45,7 @@ suite("blog index torture", function () {
       await fs.writeFile(path.join(directory, `entry-${item}.md`), markdown(item));
     }
 
-    index = await BlogIndex.open(entriesDir);
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     for (let pass = 0; pass < RECONCILE_PASSES; pass++) {
       await index.reconcile();
       assert.strictEqual(await index.countEntries(), ENTRY_COUNT);

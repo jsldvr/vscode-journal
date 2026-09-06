@@ -3,6 +3,17 @@ import * as path from "path";
 import * as sqlite3 from "sqlite3";
 import moment = require("moment");
 import { isPathInside, normalizeEntryPath } from "./pathUtils";
+import {
+  EntryContainmentError,
+  ScannedEntryFile,
+  assertGeneratedFileMovable,
+  assertSafeExistingFile,
+  assertSafeGeneratedState,
+  createSafeContainedDirectory,
+  generatedDatabasePaths,
+  resolveSafeExistingEntryFile,
+  scanContainedMarkdownFiles,
+} from "./entryContainment";
 import { parseEntryContent } from "./frontmatter";
 import { BlogEntry } from "./types";
 import {
@@ -66,12 +77,7 @@ export interface SearchOptions {
   useRegex?: boolean;
 }
 
-interface EntryFileStat {
-  absolutePath: string;
-  relativePath: string;
-  mtimeMs: number;
-  size: number;
-}
+type EntryFileStat = ScannedEntryFile;
 
 interface EntryRow {
   title: string;
@@ -99,14 +105,25 @@ export class BlogIndex {
 
   readonly entriesDir: string;
   readonly dbPath: string;
+  // The workspace trust anchor. Every generated/entry path is validated
+  // as lexically contained below this and reachable only through real,
+  // non-symlink directory components. BlogIndex never infers trust from
+  // entriesDir alone.
+  readonly trustAnchor: string;
+  private readonly generatedDir: string;
 
-  private constructor(entriesDir: string) {
+  private constructor(entriesDir: string, trustAnchor: string) {
     this.entriesDir = entriesDir;
-    this.dbPath = path.join(entriesDir, GENERATED_DIR_NAME, DB_FILE_NAME);
+    this.trustAnchor = trustAnchor;
+    this.generatedDir = path.join(entriesDir, GENERATED_DIR_NAME);
+    this.dbPath = path.join(this.generatedDir, DB_FILE_NAME);
   }
 
-  static async open(entriesDir: string): Promise<BlogIndex> {
-    const index = new BlogIndex(entriesDir);
+  static async open(
+    entriesDir: string,
+    trustAnchor: string
+  ): Promise<BlogIndex> {
+    const index = new BlogIndex(entriesDir, trustAnchor);
     await index.initialize();
     return index;
   }
@@ -114,10 +131,21 @@ export class BlogIndex {
   // -- lifecycle ----------------------------------------------------------
 
   private async initialize(): Promise<void> {
-    await fs.ensureDir(path.dirname(this.dbPath));
+    // The entries directory must already exist as a real directory below
+    // the trust anchor (IndexHost owns its deliberate creation). The
+    // generated .vs-journal directory is disposable state and may be
+    // created here, but only through validated real components.
+    await createSafeContainedDirectory(
+      this.trustAnchor,
+      this.generatedDir,
+      "unsafe-generated"
+    );
     try {
       await this.connectAndMigrate();
     } catch (error) {
+      if (error instanceof EntryContainmentError) {
+        throw error;
+      }
       console.error(
         "VS Journal: index database unusable, rebuilding:",
         error instanceof Error ? error.message : error
@@ -127,6 +155,12 @@ export class BlogIndex {
   }
 
   private async connectAndMigrate(): Promise<void> {
+    await assertSafeGeneratedState(
+      this.trustAnchor,
+      this.entriesDir,
+      this.generatedDir,
+      this.dbPath
+    );
     this.db = await openDatabase(this.dbPath);
     this.db.configure("busyTimeout", BUSY_TIMEOUT_MS);
     await this.run(`PRAGMA busy_timeout=${BUSY_TIMEOUT_MS}`);
@@ -144,7 +178,20 @@ export class BlogIndex {
   // the fresh schema from the Markdown source of truth.
   private async recoverFromBadDatabase(): Promise<void> {
     await this.closeQuietly();
-    await quarantineGeneratedFiles(this.dbPath);
+    // Revalidate the generated tree before touching any file on the
+    // recovery path; a symlinked db/quarantine/sidecar must abort
+    // recovery, never be moved or removed.
+    await assertSafeGeneratedState(
+      this.trustAnchor,
+      this.entriesDir,
+      this.generatedDir,
+      this.dbPath
+    );
+    await quarantineGeneratedFiles(
+      this.trustAnchor,
+      this.generatedDir,
+      this.dbPath
+    );
     await this.connectAndMigrate();
   }
 
@@ -254,20 +301,31 @@ export class BlogIndex {
         `Refusing to index a file outside the entries directory: ${absolutePath}`
       );
     }
+    // Physical containment immediately before the read: no linked
+    // ancestor, no linked final component, and the target is a regular
+    // file. fs.lstat semantics -- fs.stat would follow a link.
+    await assertSafeExistingFile(this.trustAnchor, absolutePath, "unsafe-entry");
     const [content, stat] = await Promise.all([
       fs.readFile(absolutePath, "utf8"),
-      fs.stat(absolutePath),
+      fs.lstat(absolutePath),
     ]);
     const relativePath = normalizeEntryPath(
       path.relative(this.entriesDir, absolutePath)
     );
     const entry = toIndexedEntry(relativePath, content, stat.mtimeMs, stat.size);
-    await this.enqueue(() =>
-      this.runTransaction(async () => {
+    await this.enqueue(async () => {
+      // Revalidate before committing indexed content: a path swapped
+      // between the read and the transaction must not enter the index.
+      await assertSafeExistingFile(
+        this.trustAnchor,
+        absolutePath,
+        "unsafe-entry"
+      );
+      await this.runTransaction(async () => {
         await this.writeEntry(entry);
         await this.pruneOrphanTags();
-      })
-    );
+      });
+    });
   }
 
   async removeByRelativePath(relativePath: string): Promise<void> {
@@ -284,9 +342,20 @@ export class BlogIndex {
   // whose mtime or size changed, removes rows for missing files, and
   // leaves unchanged files untouched. Runs entirely inside the write
   // queue so watcher events observed mid-scan apply after it.
+  // Safe Markdown scan for reconcile/rebuild: skips the generated
+  // directory, never follows a symlink or junction, and revalidates the
+  // entries directory and its ancestors. A formerly real subtree that is
+  // now a link simply stops appearing here, so reconcile's diff prunes
+  // its rows.
+  private scanFiles(): Promise<ScannedEntryFile[]> {
+    return scanContainedMarkdownFiles(this.entriesDir, this.trustAnchor, [
+      GENERATED_DIR_NAME,
+    ]);
+  }
+
   async reconcile(): Promise<void> {
     await this.enqueue(async () => {
-      const files = await scanEntryFiles(this.entriesDir);
+      const files = await this.scanFiles();
       const rows = await this.all<{
         path: string;
         mtime_ms: number;
@@ -307,7 +376,7 @@ export class BlogIndex {
         .map((row) => row.path)
         .filter((entryPath) => !present.has(entryPath));
 
-      const parsed = await parseEntryFiles(stale);
+      const parsed = await parseEntryFiles(this.trustAnchor, stale);
       await this.runTransaction(async () => {
         for (const entry of parsed) {
           await this.writeEntry(entry);
@@ -326,8 +395,8 @@ export class BlogIndex {
   // be overwritten by stale scan data.
   async rebuildAll(): Promise<void> {
     await this.enqueue(async () => {
-      const files = await scanEntryFiles(this.entriesDir);
-      const parsed = await parseEntryFiles(files);
+      const files = await this.scanFiles();
+      const parsed = await parseEntryFiles(this.trustAnchor, files);
       await this.runTransaction(async () => {
         await this.run("DELETE FROM entries");
         await this.run("DELETE FROM tags");
@@ -626,11 +695,24 @@ export class BlogIndex {
     return isPathInside(resolved, this.entriesDir);
   }
 
+  // Synchronous lexical-only resolution. Retained for the row filter
+  // (isSafeRelativePath) and callers that only need the lexical form;
+  // entry opening must use resolveSafeExistingEntryPath instead.
   resolveEntryPath(relativePath: string): string | undefined {
     if (!this.isSafeRelativePath(relativePath)) {
       return undefined;
     }
     return path.resolve(this.entriesDir, relativePath);
+  }
+
+  // Async safe resolution for entry opening: lexical containment plus
+  // real, non-symlink directory components down to an existing regular
+  // file. Returns undefined (never throws) for a lexical escape, a
+  // linked component, a missing file, or a non-regular target.
+  resolveSafeExistingEntryPath(
+    relativePath: string
+  ): Promise<string | undefined> {
+    return resolveSafeExistingEntryFile(this.entriesDir, relativePath);
   }
 
   // -- low-level promisified sqlite3 helpers ------------------------------
@@ -801,11 +883,19 @@ function toIndexedEntry(
 }
 
 async function parseEntryFiles(
+  trustAnchor: string,
   files: EntryFileStat[]
 ): Promise<IndexedEntryData[]> {
   const parsed: IndexedEntryData[] = [];
   for (const file of files) {
     try {
+      // Revalidate at the read boundary: the safe scan produced this
+      // list, but a component may have been swapped for a link since.
+      await assertSafeExistingFile(
+        trustAnchor,
+        file.absolutePath,
+        "unsafe-entry"
+      );
       const content = await fs.readFile(file.absolutePath, "utf8");
       parsed.push(
         toIndexedEntry(file.relativePath, content, file.mtimeMs, file.size)
@@ -815,61 +905,6 @@ async function parseEntryFiles(
     }
   }
   return parsed;
-}
-
-async function scanEntryFiles(entriesDir: string): Promise<EntryFileStat[]> {
-  if (!(await fs.pathExists(entriesDir))) {
-    return [];
-  }
-  const found: EntryFileStat[] = [];
-  await walkForMarkdown(entriesDir, entriesDir, found);
-  return found;
-}
-
-async function walkForMarkdown(
-  dir: string,
-  entriesDir: string,
-  found: EntryFileStat[]
-): Promise<void> {
-  let items: string[];
-  try {
-    items = await fs.readdir(dir);
-  } catch (error) {
-    console.error(`Error reading directory ${dir}:`, error);
-    return;
-  }
-  for (const item of items) {
-    if (item === GENERATED_DIR_NAME) {
-      continue;
-    }
-    await collectMarkdownItem(path.join(dir, item), entriesDir, found);
-  }
-}
-
-async function collectMarkdownItem(
-  fullPath: string,
-  entriesDir: string,
-  found: EntryFileStat[]
-): Promise<void> {
-  let stat: fs.Stats;
-  try {
-    stat = await fs.stat(fullPath);
-  } catch (error) {
-    console.error(`Error reading ${fullPath}:`, error);
-    return;
-  }
-  if (stat.isDirectory()) {
-    await walkForMarkdown(fullPath, entriesDir, found);
-    return;
-  }
-  if (fullPath.endsWith(".md")) {
-    found.push({
-      absolutePath: fullPath,
-      relativePath: normalizeEntryPath(path.relative(entriesDir, fullPath)),
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-    });
-  }
 }
 
 // -- small pure helpers ---------------------------------------------------
@@ -923,14 +958,30 @@ function openDatabase(dbPath: string): Promise<sqlite3.Database> {
 }
 
 // Moves a bad database aside as index.sqlite3.corrupt (replacing any
-// previous quarantine) and removes WAL/SHM sidecars. Only generated
-// files under .vs-journal/ are touched.
-async function quarantineGeneratedFiles(dbPath: string): Promise<void> {
-  const quarantinePath = `${dbPath}.corrupt`;
-  await fs.remove(quarantinePath).catch(() => undefined);
-  if (await fs.pathExists(dbPath)) {
-    await fs.move(dbPath, quarantinePath).catch(() => fs.remove(dbPath));
+// previous quarantine) and removes the rollback-journal and WAL/SHM
+// sidecars. The exact set of paths comes from generatedDatabasePaths()
+// -- the same definition the open guard validates -- so the two cannot
+// drift. Only generated files under .vs-journal/ are touched, and every
+// path is lstat-checked immediately before it is moved or removed: a
+// symlinked generated path aborts recovery (EntryContainmentError)
+// instead of following the link.
+async function quarantineGeneratedFiles(
+  trustAnchor: string,
+  generatedDir: string,
+  dbPath: string
+): Promise<void> {
+  const { db, quarantine, sidecars } = generatedDatabasePaths(dbPath);
+  const movable = (target: string) =>
+    assertGeneratedFileMovable(trustAnchor, generatedDir, target);
+  if ((await movable(quarantine)) === "safe") {
+    await fs.remove(quarantine).catch(() => undefined);
   }
-  await fs.remove(`${dbPath}-wal`).catch(() => undefined);
-  await fs.remove(`${dbPath}-shm`).catch(() => undefined);
+  if ((await movable(db)) === "safe") {
+    await fs.move(db, quarantine).catch(() => fs.remove(db));
+  }
+  for (const sidecar of sidecars) {
+    if ((await movable(sidecar)) === "safe") {
+      await fs.remove(sidecar).catch(() => undefined);
+    }
+  }
 }

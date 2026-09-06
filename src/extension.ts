@@ -3,6 +3,13 @@ import * as fs from "fs-extra";
 import * as path from "path";
 import moment = require("moment");
 import { BlogIndex } from "./blogIndex";
+import {
+  EntryContainmentError,
+  assertSafeExistingDirectory,
+  assertSafeExistingFile,
+  createSafeContainedDirectory,
+  verifyContainedRealDirectoryChain,
+} from "./entryContainment";
 import { IndexLifecycle } from "./indexLifecycle";
 import { SearchViewProvider } from "./searchView";
 import {
@@ -31,6 +38,27 @@ let activeHost: IndexHost | undefined;
 // path resolves outside it. Shared by the entry index, the file
 // watcher, and the media library so the containment check lives in
 // exactly one place.
+// The workspace trust anchor: the first workspace folder's path. Every
+// entry/generated path is required to be lexically contained below this
+// and reachable only through real, non-symlink directory components.
+function workspaceTrustAnchor(): string | undefined {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+// Maps an EntryContainmentError to a concise, actionable message that
+// distinguishes an unsafe configured journal root, an unsafe entry path,
+// and an unsafe generated database path, without leaking a stack trace.
+function describeContainmentError(error: EntryContainmentError): string {
+  switch (error.kind) {
+    case "unsafe-root":
+      return "The configured journal directory is not safe: it, or a directory above it, is a symlink or junction. Update vsJournal.blogPath to a real directory inside the workspace.";
+    case "unsafe-generated":
+      return "The generated journal index path is not safe: index.sqlite3, its .vs-journal directory, or a sidecar is a symlink or junction. Remove the link so the index can be rebuilt.";
+    default:
+      return "That entry path is not safe: it, or a directory above it, is a symlink, junction, or not a regular file. Journal entries must be real files inside the entries directory.";
+  }
+}
+
 function resolveBlogDir(): string | undefined {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   if (!workspaceFolder) {
@@ -216,20 +244,43 @@ class IndexHost {
     entriesDir: string,
     createBlogDir: boolean
   ): Promise<BlogIndex | undefined> {
-    const blogDir = path.dirname(entriesDir);
-    if (!createBlogDir && !(await fs.pathExists(blogDir))) {
+    const anchor = workspaceTrustAnchor();
+    if (!anchor) {
       return undefined;
     }
     try {
-      await fs.ensureDir(entriesDir);
-      return await BlogIndex.open(entriesDir);
-    } catch (error) {
-      console.error("VS Journal: failed to open the entry index:", error);
-      vscode.window.showErrorMessage(
-        `VS Journal could not open its entry index: ${error}`
+      // Validate every existing component from the workspace root down to
+      // the entries directory. A symlink/junction anywhere on the chain
+      // is fatal; a missing blog/entries directory is created only in an
+      // authorized flow (New Entry), never by passive activation.
+      const chain = await verifyContainedRealDirectoryChain(
+        anchor,
+        entriesDir,
+        "unsafe-root",
+        { allowMissingTail: true }
       );
+      if (chain.status === "missing") {
+        if (!createBlogDir) {
+          return undefined;
+        }
+        await createSafeContainedDirectory(anchor, entriesDir, "unsafe-root");
+      }
+      return await BlogIndex.open(entriesDir, anchor);
+    } catch (error) {
+      this.reportOpenFailure(error);
       return undefined;
     }
+  }
+
+  private reportOpenFailure(error: unknown): void {
+    console.error("VS Journal: failed to open the entry index:", error);
+    if (error instanceof EntryContainmentError) {
+      vscode.window.showErrorMessage(describeContainmentError(error));
+      return;
+    }
+    vscode.window.showErrorMessage(
+      `VS Journal could not open its entry index: ${error}`
+    );
   }
 }
 
@@ -527,17 +578,32 @@ async function openEntryByRelativePath(
       vscode.window.showErrorMessage("The journal index is not ready yet.");
       return;
     }
-    // Containment guard: never resolve or open an indexed path outside
-    // the configured entries directory.
-    const absolutePath = index.resolveEntryPath(relativePath);
+    // Containment guard: reject a lexical escape, any symlinked path
+    // component, and a non-regular final file. Never resolve or open an
+    // indexed path outside the configured entries directory.
+    const absolutePath = await index.resolveSafeExistingEntryPath(relativePath);
     if (!absolutePath) {
       vscode.window.showErrorMessage(
-        `Entry path is outside the blog directory: ${relativePath}`
+        `That entry cannot be opened safely: ${relativePath}`
       );
       return;
     }
-    if (!(await fs.pathExists(absolutePath))) {
-      vscode.window.showErrorMessage(`Entry not found: ${relativePath}`);
+    // Revalidate at the open boundary: a component swapped for a link
+    // between resolution and open must not be handed to openTextDocument.
+    const anchor = workspaceTrustAnchor();
+    try {
+      if (!anchor) {
+        throw new EntryContainmentError(
+          "unsafe-entry",
+          absolutePath,
+          "No workspace trust anchor"
+        );
+      }
+      await assertSafeExistingFile(anchor, absolutePath, "unsafe-entry");
+    } catch {
+      vscode.window.showErrorMessage(
+        `That entry cannot be opened safely: ${relativePath}`
+      );
       return;
     }
     const document = await vscode.workspace.openTextDocument(absolutePath);
@@ -612,6 +678,23 @@ async function setBlogPath() {
       return;
     }
 
+    // Reject a configured root whose existing chain runs through a
+    // symlink or junction before it is stored or created.
+    try {
+      await verifyContainedRealDirectoryChain(
+        workspaceFolder.uri.fsPath,
+        fullPath,
+        "unsafe-root",
+        { allowMissingTail: true }
+      );
+    } catch (error) {
+      if (error instanceof EntryContainmentError) {
+        vscode.window.showErrorMessage(describeContainmentError(error));
+        return;
+      }
+      throw error;
+    }
+
     await config.update(
       "blogPath",
       newPath,
@@ -624,10 +707,22 @@ async function setBlogPath() {
       });
 
       if (create === "Yes") {
-        await fs.ensureDir(path.join(fullPath, "entries"));
-        vscode.window.showInformationMessage(
-          `Blog directory created at: ${newPath}`
-        );
+        try {
+          await createSafeContainedDirectory(
+            workspaceFolder.uri.fsPath,
+            path.join(fullPath, "entries"),
+            "unsafe-root"
+          );
+          vscode.window.showInformationMessage(
+            `Blog directory created at: ${newPath}`
+          );
+        } catch (error) {
+          if (error instanceof EntryContainmentError) {
+            vscode.window.showErrorMessage(describeContainmentError(error));
+            return;
+          }
+          throw error;
+        }
       }
     }
 
@@ -725,6 +820,12 @@ async function createNewEntry(host: IndexHost) {
       return;
     }
 
+    const anchor = workspaceTrustAnchor();
+    if (!anchor) {
+      vscode.window.showErrorMessage("No workspace folder found.");
+      return;
+    }
+
     const now = moment();
     const entryDir = path.join(
       index.entriesDir,
@@ -732,7 +833,11 @@ async function createNewEntry(host: IndexHost) {
       now.format("MM"),
       now.format("DD")
     );
-    await fs.ensureDir(entryDir);
+    // Validate the entries root and the date-directory chain, then create
+    // any missing component through validated real directories and
+    // revalidate each created component. A linked or swapped ancestor
+    // aborts here before anything is written, indexed, or opened.
+    await createSafeContainedDirectory(anchor, entryDir, "unsafe-entry");
 
     const sanitizedTitle = title
       .replace(/[^a-zA-Z0-9\s]/g, "")
@@ -754,11 +859,24 @@ tags: []
 Write your blog entry here...
 `;
 
+    // Revalidate the date directory immediately before the exclusive
+    // create.
+    await assertSafeExistingDirectory(anchor, entryDir, "unsafe-entry");
+
     // Exclusive create with retry, so two same-titled entries created the
     // same day never silently overwrite each other.
     const filePath = await createUniqueFile(entryDir, filename, content);
+
+    // The freshly created path must be a regular, non-symlink file, and
+    // its chain must still be safe, before it is indexed.
+    await assertSafeExistingFile(anchor, filePath, "unsafe-entry");
     await index.upsertFromFile(filePath);
 
+    // upsertFromFile performs filesystem and database awaits; revalidate
+    // once more at the openTextDocument boundary so a component swapped
+    // for a link during indexing cannot make New Entry open an external
+    // file.
+    await assertSafeExistingFile(anchor, filePath, "unsafe-entry");
     const document = await vscode.workspace.openTextDocument(filePath);
     await vscode.window.showTextDocument(document);
 
@@ -766,6 +884,10 @@ Write your blog entry here...
       `Blog entry "${title}" created successfully!`
     );
   } catch (error) {
+    if (error instanceof EntryContainmentError) {
+      vscode.window.showErrorMessage(describeContainmentError(error));
+      return;
+    }
     vscode.window.showErrorMessage(`Failed to create blog entry: ${error}`);
   }
 }
