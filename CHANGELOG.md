@@ -25,6 +25,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   still never creates an absent blog directory, and New Entry still
   escalates to create it on demand.
 
+## [1.3.1] - 2026-09-05
+
 ### Fixed
 
 - The Match Case / Whole Word / Regex search now runs its `RegExp` scan on a

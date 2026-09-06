@@ -344,6 +344,85 @@ suite("IndexLifecycle", () => {
     assert.deepStrictEqual(h.closed, ["A"]);
   });
 
+  test("an unresolvable target caches no stale pending open", async () => {
+    const h = new Harness();
+    h.target = undefined;
+    const life = new IndexLifecycle<FakeIndex>(h.deps());
+
+    assert.strictEqual(await life.ensure(false), undefined);
+    assert.strictEqual(h.openCalls.length, 0, "no open attempted without a target");
+
+    // The pre-fix defect left a resolved pending open cached here, so
+    // this passive retry returned undefined with no open started (and an
+    // ensure(true) looped forever through the escalation branch).
+    h.target = "A";
+    const opened = life.ensure(false);
+    await flush();
+    assert.strictEqual(h.openCalls.length, 1, "a fresh open starts once a target exists");
+    const idx: FakeIndex = { id: "A" };
+    h.openCalls[0].gate.resolve(idx);
+    assert.strictEqual(await opened, idx);
+    assert.strictEqual(life.get(), idx);
+  });
+
+  test("ensure(true) still escalates after an unresolvable passive open", async () => {
+    const h = new Harness();
+    h.target = undefined;
+    const life = new IndexLifecycle<FakeIndex>(h.deps());
+    assert.strictEqual(await life.ensure(false), undefined);
+
+    h.target = "A";
+    const created = life.ensure(true);
+    await flush();
+    assert.strictEqual(h.openCalls.length, 1);
+    assert.strictEqual(h.openCalls[0].createTargetDir, true);
+    const idx: FakeIndex = { id: "A" };
+    h.openCalls[0].gate.resolve(idx);
+    assert.strictEqual(await created, idx);
+  });
+
+  test("disposal awaits a superseded pending open and its close", async () => {
+    const h = new Harness();
+    const life = new IndexLifecycle<FakeIndex>(h.deps());
+
+    const eA = life.ensure();
+    await flush();
+    h.target = "B";
+    await life.invalidate();
+    const eB = life.ensure();
+    await flush();
+    const bIndex: FakeIndex = { id: "B" };
+    h.openCalls[1].gate.resolve(bIndex);
+    await eB;
+    assert.strictEqual(life.get(), bIndex);
+
+    // A is still opening. Block its close so disposal is observed
+    // waiting for the disowned open to settle and close.
+    h.blockClose("A");
+    let done = false;
+    const disposal = life.dispose().then(() => {
+      done = true;
+    });
+    await flush();
+    assert.strictEqual(done, false, "dispose must not resolve while A is still opening");
+
+    const aIndex: FakeIndex = { id: "A" };
+    h.openCalls[0].gate.resolve(aIndex);
+    await flush();
+    assert.strictEqual(done, false, "dispose must wait for the superseded A to close");
+    assert.deepStrictEqual(
+      h.closed.slice().sort(),
+      ["A", "B"],
+      "A is closed before disposal resolves"
+    );
+
+    h.releaseClose("A");
+    await disposal;
+    assert.strictEqual(done, true);
+    assert.strictEqual(life.isDisposed(), true);
+    assert.strictEqual(await eA, undefined);
+  });
+
   test("invalidate after disposal cannot reopen or resurrect state", async () => {
     const h = new Harness();
     const life = new IndexLifecycle<FakeIndex>(h.deps());

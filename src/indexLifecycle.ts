@@ -13,10 +13,12 @@
 //   - Every index successfully opened for a superseded generation is
 //     closed.
 //   - Callers sharing a generation share the one in-flight open.
-//   - A failed open leaves the host able to retry.
-//   - Disposal is terminal and idempotent: it awaits the in-flight open
-//     and every owned close, and no later `ensure()` can start another
-//     open or resurrect index state.
+//   - A failed open (or an unresolvable target) leaves the host able to
+//     retry with no stale pending state cached.
+//   - Disposal is terminal and idempotent: it awaits every open still in
+//     flight -- including ones already superseded -- and every owned
+//     close, and no later `ensure()` can start another open or resurrect
+//     index state.
 //
 // It is deliberately free of `vscode` imports so the lifecycle logic can
 // be exercised directly by the unit suite with deferred fakes.
@@ -43,7 +45,9 @@ export interface IndexLifecycleDeps<TIndex> {
 interface PendingOpen<TIndex> {
   readonly generation: number;
   readonly createTargetDir: boolean;
-  readonly promise: Promise<TIndex | undefined>;
+  // Assigned synchronously by startOpen() immediately after `this.pending`
+  // is set, so runOpen()'s completion can disown it by identity.
+  promise: Promise<TIndex | undefined>;
 }
 
 // Resolve to the value, or to undefined on rejection. Every consumer of
@@ -63,7 +67,13 @@ export class IndexLifecycle<TIndex> {
   private pending: PendingOpen<TIndex> | undefined;
   private disposed = false;
   private disposal: Promise<void> | undefined;
-  private readonly cleanups = new Set<Promise<void>>();
+  // Every open still running, keyed by a self-removing wrapper. Includes
+  // opens invalidate() has already disowned as current -- disposal still
+  // has to wait for them to finish and self-close.
+  private readonly inFlight = new Set<Promise<unknown>>();
+  // Closes owned by the host: retired-index closes from invalidate(),
+  // superseded-open self-closes, and the active-index close at disposal.
+  private readonly cleanups = new Set<Promise<unknown>>();
 
   constructor(private readonly deps: IndexLifecycleDeps<TIndex>) {}
 
@@ -100,40 +110,52 @@ export class IndexLifecycle<TIndex> {
       return this.ensure(createTargetDir);
     }
     if (!this.pending) {
-      this.pending = this.startOpen(createTargetDir);
+      this.startOpen(createTargetDir);
     }
-    await settle(this.pending.promise);
+    const pending = this.pending;
+    if (pending) {
+      await settle(pending.promise);
+    }
     if (this.disposed) {
       return undefined;
     }
     return this.current;
   }
 
-  private startOpen(createTargetDir: boolean): PendingOpen<TIndex> {
-    const generation = this.generation;
+  // Claims pending ownership synchronously, then starts the work, so a
+  // synchronously-settling attempt (an unresolvable target) can never
+  // leave a stale pending open cached. An unresolvable target claims
+  // nothing: ensure() falls through to the (absent) current index and a
+  // later call retries from scratch.
+  private startOpen(createTargetDir: boolean): void {
     const target = this.deps.resolveTarget();
-    return {
+    if (target === undefined) {
+      return;
+    }
+    const generation = this.generation;
+    const pending: PendingOpen<TIndex> = {
       generation,
       createTargetDir,
-      promise: this.runOpen(generation, target, createTargetDir),
+      promise: Promise.resolve<TIndex | undefined>(undefined),
     };
+    this.pending = pending;
+    pending.promise = this.runOpen(pending, generation, target, createTargetDir);
+    this.retain(this.inFlight, pending.promise);
   }
 
   private async runOpen(
+    pending: PendingOpen<TIndex>,
     generation: number,
-    target: string | undefined,
+    target: string,
     createTargetDir: boolean
   ): Promise<TIndex | undefined> {
     let opened: TIndex | undefined;
     try {
-      opened =
-        target === undefined
-          ? undefined
-          : await this.deps.open(target, createTargetDir);
+      opened = await this.deps.open(target, createTargetDir);
     } catch {
       opened = undefined;
     } finally {
-      if (this.pending?.generation === generation) {
+      if (this.pending === pending) {
         this.pending = undefined;
       }
     }
@@ -143,7 +165,7 @@ export class IndexLifecycle<TIndex> {
     if (!this.isCurrentGeneration(generation)) {
       // Superseded or disposed while opening: close what we opened and
       // never publish it.
-      this.trackCleanup(this.deps.close(opened));
+      this.retain(this.cleanups, this.deps.close(opened));
       return undefined;
     }
     this.current = opened;
@@ -160,7 +182,8 @@ export class IndexLifecycle<TIndex> {
 
   // Retire the current index and disown any in-flight open. The next
   // `ensure()` starts a fresh open for whatever the configuration now
-  // resolves to.
+  // resolves to. A disowned open stays tracked in `inFlight` so disposal
+  // still waits for it.
   invalidate(): Promise<void> {
     if (this.disposed) {
       return this.disposal ?? Promise.resolve();
@@ -174,13 +197,13 @@ export class IndexLifecycle<TIndex> {
       return Promise.resolve();
     }
     const closed = this.deps.close(previous);
-    this.trackCleanup(closed);
+    this.retain(this.cleanups, closed);
     return settle(closed).then(() => undefined);
   }
 
-  // Terminal and idempotent. Awaits the in-flight open (whose result is
-  // now obsolete and self-closes) and every owned close, then refuses
-  // all further work.
+  // Terminal and idempotent. Awaits every open still in flight (each
+  // self-closes when it resolves for a disposed host) and every owned
+  // close, then refuses all further work.
   dispose(): Promise<void> {
     if (this.disposal) {
       return this.disposal;
@@ -192,30 +215,27 @@ export class IndexLifecycle<TIndex> {
   }
 
   private async runDispose(): Promise<void> {
-    const pending = this.pending;
     this.pending = undefined;
-    if (pending) {
-      await settle(pending.promise);
-    }
+    await this.drain(this.inFlight);
     const previous = this.current;
     this.current = undefined;
     this.currentGeneration = -1;
     if (previous) {
-      this.trackCleanup(this.deps.close(previous));
+      this.retain(this.cleanups, this.deps.close(previous));
     }
-    await this.drainCleanups();
+    await this.drain(this.cleanups);
   }
 
-  private trackCleanup(promise: Promise<void>): void {
-    const wrapped = settle(promise).then(() => {
-      this.cleanups.delete(wrapped);
+  private retain(set: Set<Promise<unknown>>, work: Promise<unknown>): void {
+    const tracked = settle(work).then(() => {
+      set.delete(tracked);
     });
-    this.cleanups.add(wrapped);
+    set.add(tracked);
   }
 
-  private async drainCleanups(): Promise<void> {
-    while (this.cleanups.size > 0) {
-      await Promise.all([...this.cleanups]);
+  private async drain(set: Set<Promise<unknown>>): Promise<void> {
+    while (set.size > 0) {
+      await Promise.all([...set]);
     }
   }
 }
