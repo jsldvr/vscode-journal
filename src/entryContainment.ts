@@ -379,12 +379,28 @@ async function walkContained(
   }
 }
 
-// Generated-state guard. Every one of entriesDir, .vs-journal, the
-// database file, its quarantine copy, and the WAL/SHM sidecars must,
-// where it exists, be a real directory / regular file and never a
-// symlink. Missing generated files are fine -- they are created on
-// demand. Called immediately before a SQLite open, before recovery, and
-// again before a quarantine move/remove.
+// Every on-disk file SQLite may create beside the index for the same
+// logical database: the database itself, the corruption quarantine copy,
+// the WAL/SHM sidecars, and the pre-WAL rollback journal. Centralized so
+// the open guard and the recovery cleanup can never drift out of sync
+// and miss one (a symlink at any of them would otherwise be followed by
+// native SQLite or by fs.move/fs.remove).
+export function generatedDatabasePaths(dbPath: string): string[] {
+  return [
+    dbPath,
+    `${dbPath}.corrupt`,
+    `${dbPath}-journal`,
+    `${dbPath}-wal`,
+    `${dbPath}-shm`,
+  ];
+}
+
+// Generated-state guard. Every one of entriesDir, .vs-journal, and the
+// database files from generatedDatabasePaths() must, where it exists, be
+// a real directory / regular file and never a symlink. Missing generated
+// files are fine -- they are created on demand. Called immediately
+// before a SQLite open, before recovery, and again before a quarantine
+// move/remove.
 export async function assertSafeGeneratedState(
   anchor: string,
   entriesDir: string,
@@ -405,7 +421,7 @@ export async function assertSafeGeneratedState(
   if (generatedChain.status === "missing") {
     return;
   }
-  for (const file of [dbPath, `${dbPath}.corrupt`, `${dbPath}-wal`, `${dbPath}-shm`]) {
+  for (const file of generatedDatabasePaths(dbPath)) {
     await assertRegularFileOrMissing(anchor, generatedDir, file);
   }
 }

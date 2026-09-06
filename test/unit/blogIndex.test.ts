@@ -823,6 +823,30 @@ suite("blogIndex symlink containment", function () {
     }
   });
 
+  test("BlogIndex.open rejects a pre-existing symlinked -journal sidecar and does not consume its target", async () => {
+    const generatedDir = path.join(entries, GENERATED_DIR_NAME);
+    await fs.ensureDir(generatedDir);
+    const linkTarget = path.join(root, "outside-journal");
+    await fs.writeFile(linkTarget, "pre-existing rollback journal bytes");
+    const journalLink = path.join(generatedDir, `${DB_FILE_NAME}-journal`);
+    if (!(await tryFileLink(linkTarget, journalLink))) {
+      return; // No file-symlink privilege on this platform.
+    }
+    await assert.rejects(
+      () => BlogIndex.open(entries, root),
+      (error: unknown) =>
+        error instanceof EntryContainmentError &&
+        error.kind === "unsafe-generated"
+    );
+    // Native SQLite / recovery must not have opened, truncated, or
+    // removed the link's external target.
+    assert.strictEqual(await fs.pathExists(linkTarget), true);
+    assert.strictEqual(
+      await fs.readFile(linkTarget, "utf8"),
+      "pre-existing rollback journal bytes"
+    );
+  });
+
   test("upsertFromFile refuses a file reached through a junctioned ancestor and never reads the target", async () => {
     index = await BlogIndex.open(entries, root);
 

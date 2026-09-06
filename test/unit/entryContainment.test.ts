@@ -9,6 +9,7 @@ import {
   assertSafeExistingFile,
   assertSafeGeneratedState,
   createSafeContainedDirectory,
+  generatedDatabasePaths,
   resolveSafeExistingEntryFile,
   scanContainedMarkdownFiles,
   verifyContainedRealDirectoryChain,
@@ -381,6 +382,48 @@ suite("entryContainment", function () {
     const originalLstat = fsExtraModule.lstat;
     fsExtraModule.lstat = async (target: string) => {
       if (target === dbPath) {
+        return {
+          isSymbolicLink: () => true,
+          isFile: () => false,
+          isDirectory: () => false,
+        };
+      }
+      return originalLstat(target);
+    };
+    try {
+      await assert.rejects(
+        () => assertSafeGeneratedState(root, entries, generated, dbPath),
+        (error: unknown) =>
+          error instanceof EntryContainmentError &&
+          error.kind === "unsafe-generated"
+      );
+    } finally {
+      fsExtraModule.lstat = originalLstat;
+    }
+  });
+
+  test("generatedDatabasePaths covers the db, quarantine, rollback journal, and WAL/SHM sidecars", () => {
+    const dbPath = path.join(root, "entries", ".vs-journal", "index.sqlite3");
+    assert.deepStrictEqual(generatedDatabasePaths(dbPath).sort(), [
+      dbPath,
+      `${dbPath}-journal`,
+      `${dbPath}-shm`,
+      `${dbPath}-wal`,
+      `${dbPath}.corrupt`,
+    ].sort());
+  });
+
+  test("assertSafeGeneratedState rejects a symlinked rollback journal (index.sqlite3-journal, fs fake for the link)", async () => {
+    const entries = path.join(root, "entries");
+    const generated = path.join(entries, ".vs-journal");
+    await fs.ensureDir(generated);
+    const dbPath = path.join(generated, "index.sqlite3");
+    const journalPath = `${dbPath}-journal`;
+
+    const fsExtraModule = require("fs-extra");
+    const originalLstat = fsExtraModule.lstat;
+    fsExtraModule.lstat = async (target: string) => {
+      if (target === journalPath) {
         return {
           isSymbolicLink: () => true,
           isFile: () => false,

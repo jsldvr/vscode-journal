@@ -975,7 +975,8 @@ async function quarantineGeneratedFiles(
   if ((await movable(dbPath)) === "safe") {
     await fs.move(dbPath, quarantinePath).catch(() => fs.remove(dbPath));
   }
-  for (const sidecar of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+  // Rollback journal (pre-WAL) plus the WAL/SHM sidecars.
+  for (const sidecar of [`${dbPath}-journal`, `${dbPath}-wal`, `${dbPath}-shm`]) {
     if ((await movable(sidecar)) === "safe") {
       await fs.remove(sidecar).catch(() => undefined);
     }
