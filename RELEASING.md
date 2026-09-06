@@ -1,9 +1,20 @@
 # Release Process
 
 This procedure prepares and verifies a release from `main`. After the release
-change reaches `main`, `.github/workflows/release.yml` creates the Git tag,
+change reaches `main`, `.github/workflows/release.yml` runs the complete QA
+gate plus minimum-version Extension Host acceptance, creates the Git tag,
 builds every supported VSIX, and publishes the GitHub release. It does not
-publish to the VS Code Marketplace.
+publish to the VS Code Marketplace; Marketplace publication remains
+separately authorized and is not automated by this workflow.
+
+Pull requests run `.github/workflows/ci.yml`, whose single aggregate job
+**`CI Required`** covers the full QA gate, acceptance against both the
+minimum (`1.125.0`) and current stable VS Code, and the seven-target package
+matrix. `CI Required` is the only context the `main` branch ruleset needs to
+require. That ruleset change is prepared in
+`.github/rulesets/main-branch-required-check.json` but has not been applied,
+so a failing CI run does not block merging yet; once the ruleset requires
+`CI Required`, it will.
 
 Replace `X.Y.Z` in every command with the intended semantic version. Valid
 prerelease versions such as `1.0.1-rc-1` and `1.0.1-beta` are supported.
@@ -82,20 +93,25 @@ git diff -- package.json package-lock.json CHANGELOG.md
 
 ## 3. Verify the Release
 
-Run the same checks required by CI:
+Run the complete QA gate that CI and the release workflow require:
 
 ```bash
 npm run release:check
 ```
 
-Then run the VS Code Extension Host suite from a graphical desktop session:
+`release:check` is now an alias for `test:qa`: compile, lint, unit, property,
+release-metadata, and the stable Extension Host acceptance suite. Run it from
+a graphical desktop session, or under `xvfb-run -a` on Linux, so the
+Extension Host can launch.
+
+Then run the acceptance suite against the minimum supported VS Code:
 
 ```bash
-npm run test:integration
+VSCODE_TEST_VERSION=1.125.0 npm run test:acceptance
 ```
 
 Stop on any failure. Do not treat an unavailable display as a passing
-integration test.
+acceptance test.
 
 ## 4. Build and Install the VSIX
 
@@ -155,12 +171,17 @@ Do not create or push the version tag manually. On the push to `main`, the
 release workflow:
 
 1. Reads and validates the version from `package.json`.
-2. Exits successfully when that version tag or release already exists.
+2. Exits successfully when that version tag or release already exists, with
+   all downstream verification, packaging, and release jobs skipped.
 3. Extracts the matching changelog section and contributors since the prior
    release tag.
-4. Runs the release checks.
-5. Builds and verifies all seven platform-specific VSIX packages.
-6. Creates `vX.Y.Z` and a GitHub release titled `Release vX.Y.Z`.
+4. Runs the complete stable QA gate (`release:check`) and the
+   `VSCODE_TEST_VERSION=1.125.0` Extension Host acceptance suite. Packaging
+   cannot start unless both succeed.
+5. Builds and verifies all seven platform-specific VSIX packages, including
+   the bundled native binary check.
+6. Creates `vX.Y.Z` and a GitHub release titled `Release vX.Y.Z`, only after
+   verification and every platform package succeed.
 7. Marks versions with a SemVer prerelease suffix as prereleases.
 
 Monitor the workflow:

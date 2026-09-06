@@ -8,9 +8,12 @@ permissions:
   contents: read
 
 jobs:
-  build-and-unit-test:
+  qa:
+    name: QA - stable VS Code
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The QA gate ends with an Extension Host acceptance run that downloads and
+    # launches VS Code, so it needs well more than the old unit-only budget.
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -25,18 +28,39 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Compile
-        run: npm run compile
+      # xvfb-run provides the virtual display the Extension Host needs on Linux.
+      # test:qa is the single QA contract (test/scripts/run-qa.js): compile,
+      # lint, unit, property, release-metadata, and stable acceptance.
+      - name: Run the complete QA gate against stable VS Code
+        run: xvfb-run -a npm run test:qa
 
-      - name: Lint
-        run: npm run lint
+  acceptance-min:
+    name: Acceptance - minimum VS Code
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      VSCODE_TEST_VERSION: "1.125.0"
 
-      - name: Run unit tests
-        run: npm run test:unit
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Extension Host acceptance tests against the minimum supported VS Code
+        run: xvfb-run -a npm run test:acceptance
 
   # Verifies that every supported platform target can be packaged with
   # the correct sqlite3 N-API prebuilt binary bundled in the VSIX.
   package-platform-targets:
+    name: Package platform targets
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -71,3 +95,33 @@ jobs:
         run: |
           VSIX=$(ls *.vsix)
           unzip -l "$VSIX" | grep "node_modules/sqlite3/build/Release/node_sqlite3.node"
+
+  # Single deterministic aggregate status context for the active `main`
+  # ruleset. It is the only check the ruleset needs to require: always()
+  # runs it even when a dependency fails or is skipped, and it exits
+  # non-zero unless every required job reported success. A skipped or
+  # cancelled dependency therefore fails this check.
+  ci-required:
+    name: CI Required
+    needs:
+      - qa
+      - acceptance-min
+      - package-platform-targets
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Assert every required job succeeded
+        env:
+          QA_RESULT: ${{ needs.qa.result }}
+          ACCEPTANCE_MIN_RESULT: ${{ needs.acceptance-min.result }}
+          PACKAGE_TARGETS_RESULT: ${{ needs.package-platform-targets.result }}
+        run: |
+          echo "qa=$QA_RESULT acceptance-min=$ACCEPTANCE_MIN_RESULT package-platform-targets=$PACKAGE_TARGETS_RESULT"
+          if [ "$QA_RESULT" != "success" ] ||
+             [ "$ACCEPTANCE_MIN_RESULT" != "success" ] ||
+             [ "$PACKAGE_TARGETS_RESULT" != "success" ]; then
+            echo "One or more required jobs did not succeed."
+            exit 1
+          fi
