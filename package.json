@@ -218,7 +218,7 @@
     "prepare": "husky",
     "lint": "eslint src test --ext ts --ignore-pattern test/results/**",
     "lint:staged": "lint-staged",
-    "release:check": "npm run compile && npm run lint && npm run test:unit && npm run test:release",
+    "release:check": "npm run test:qa",
     "release:metadata": "node scripts/release-metadata.js --output-dir test/results/release",
     "package": "vsce package",
     "stage:sqlite3": "node scripts/stage-sqlite3-prebuild.js",
