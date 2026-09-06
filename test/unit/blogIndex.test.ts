@@ -298,6 +298,29 @@ suite("blogIndex", function () {
     assert.ok(await fs.pathExists(`${dbPath}.corrupt`));
   });
 
+  test("recovery removes a stale rollback-journal sidecar (index.sqlite3-journal), not only WAL/SHM", async () => {
+    const dbPath = dbPathFor(entriesDir);
+    await fs.ensureDir(path.dirname(dbPath));
+    await fs.writeFile(dbPath, "not a sqlite database");
+    // A stale pre-WAL rollback journal left beside the bad database. It
+    // must be cleaned up by recovery via the shared generatedDatabase
+    // sidecar list; the healthy rebuilt database then runs in WAL mode,
+    // so -wal/-shm legitimately reappear and are not asserted on.
+    await fs.writeFile(`${dbPath}-journal`, "stale rollback journal");
+    await writeEntry(entriesDir, "ok.md", entryMarkdown("Ok", "healthy body"));
+
+    index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
+    await index.reconcile();
+
+    assert.ok(await fs.pathExists(`${dbPath}.corrupt`));
+    assert.strictEqual(
+      await fs.pathExists(`${dbPath}-journal`),
+      false,
+      "recovery must remove the rollback journal via the shared sidecar list"
+    );
+    assert.strictEqual(await index.countEntries(), 1);
+  });
+
   test("a database written by a newer schema version is treated as incompatible and rebuilt", async () => {
     index = await BlogIndex.open(entriesDir, path.dirname(entriesDir));
     await index.run("PRAGMA user_version=99");

@@ -402,15 +402,29 @@ suite("entryContainment", function () {
     }
   });
 
-  test("generatedDatabasePaths covers the db, quarantine, rollback journal, and WAL/SHM sidecars", () => {
+  test("generatedDatabasePaths returns db, quarantine, and sidecars (rollback journal + WAL/SHM) with all = their union", () => {
     const dbPath = path.join(root, "entries", ".vs-journal", "index.sqlite3");
-    assert.deepStrictEqual(generatedDatabasePaths(dbPath).sort(), [
-      dbPath,
+    const paths = generatedDatabasePaths(dbPath);
+    assert.strictEqual(paths.db, dbPath);
+    assert.strictEqual(paths.quarantine, `${dbPath}.corrupt`);
+    assert.deepStrictEqual(paths.sidecars, [
       `${dbPath}-journal`,
-      `${dbPath}-shm`,
       `${dbPath}-wal`,
-      `${dbPath}.corrupt`,
-    ].sort());
+      `${dbPath}-shm`,
+    ]);
+    assert.deepStrictEqual(
+      [...paths.all].sort(),
+      [
+        dbPath,
+        `${dbPath}.corrupt`,
+        `${dbPath}-journal`,
+        `${dbPath}-wal`,
+        `${dbPath}-shm`,
+      ].sort()
+    );
+    // The rollback journal must be in the recovery-removed set, not just
+    // the open-guard set.
+    assert.ok(paths.sidecars.includes(`${dbPath}-journal`));
   });
 
   test("assertSafeGeneratedState rejects a symlinked rollback journal (index.sqlite3-journal, fs fake for the link)", async () => {

@@ -10,6 +10,7 @@ import {
   assertSafeExistingFile,
   assertSafeGeneratedState,
   createSafeContainedDirectory,
+  generatedDatabasePaths,
   resolveSafeExistingEntryFile,
   scanContainedMarkdownFiles,
 } from "./entryContainment";
@@ -957,26 +958,28 @@ function openDatabase(dbPath: string): Promise<sqlite3.Database> {
 }
 
 // Moves a bad database aside as index.sqlite3.corrupt (replacing any
-// previous quarantine) and removes WAL/SHM sidecars. Only generated
-// files under .vs-journal/ are touched, and every path is lstat-checked
-// immediately before it is moved or removed: a symlinked generated path
-// aborts recovery (EntryContainmentError) instead of following the link.
+// previous quarantine) and removes the rollback-journal and WAL/SHM
+// sidecars. The exact set of paths comes from generatedDatabasePaths()
+// -- the same definition the open guard validates -- so the two cannot
+// drift. Only generated files under .vs-journal/ are touched, and every
+// path is lstat-checked immediately before it is moved or removed: a
+// symlinked generated path aborts recovery (EntryContainmentError)
+// instead of following the link.
 async function quarantineGeneratedFiles(
   trustAnchor: string,
   generatedDir: string,
   dbPath: string
 ): Promise<void> {
-  const quarantinePath = `${dbPath}.corrupt`;
+  const { db, quarantine, sidecars } = generatedDatabasePaths(dbPath);
   const movable = (target: string) =>
     assertGeneratedFileMovable(trustAnchor, generatedDir, target);
-  if ((await movable(quarantinePath)) === "safe") {
-    await fs.remove(quarantinePath).catch(() => undefined);
+  if ((await movable(quarantine)) === "safe") {
+    await fs.remove(quarantine).catch(() => undefined);
   }
-  if ((await movable(dbPath)) === "safe") {
-    await fs.move(dbPath, quarantinePath).catch(() => fs.remove(dbPath));
+  if ((await movable(db)) === "safe") {
+    await fs.move(db, quarantine).catch(() => fs.remove(db));
   }
-  // Rollback journal (pre-WAL) plus the WAL/SHM sidecars.
-  for (const sidecar of [`${dbPath}-journal`, `${dbPath}-wal`, `${dbPath}-shm`]) {
+  for (const sidecar of sidecars) {
     if ((await movable(sidecar)) === "safe") {
       await fs.remove(sidecar).catch(() => undefined);
     }

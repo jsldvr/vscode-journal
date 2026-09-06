@@ -379,20 +379,34 @@ async function walkContained(
   }
 }
 
-// Every on-disk file SQLite may create beside the index for the same
-// logical database: the database itself, the corruption quarantine copy,
-// the WAL/SHM sidecars, and the pre-WAL rollback journal. Centralized so
-// the open guard and the recovery cleanup can never drift out of sync
-// and miss one (a symlink at any of them would otherwise be followed by
-// native SQLite or by fs.move/fs.remove).
-export function generatedDatabasePaths(dbPath: string): string[] {
-  return [
-    dbPath,
-    `${dbPath}.corrupt`,
-    `${dbPath}-journal`,
-    `${dbPath}-wal`,
-    `${dbPath}-shm`,
-  ];
+export interface GeneratedDatabasePaths {
+  // The database file itself.
+  db: string;
+  // The corruption quarantine copy (recovery's fs.move destination).
+  quarantine: string;
+  // Files removed by recovery: the pre-WAL rollback journal and the
+  // WAL/SHM sidecars.
+  sidecars: string[];
+  // db + quarantine + sidecars: everything to physically validate before
+  // a SQLite open, recovery, move, or removal.
+  all: string[];
+}
+
+// The single definition of every on-disk file SQLite may create beside
+// the index for the same logical database. Both the open guard
+// (assertSafeGeneratedState) and the recovery cleanup
+// (quarantineGeneratedFiles) derive their path lists from here, so they
+// cannot drift out of sync and miss one -- a symlink at any of these
+// would otherwise be followed by native SQLite or by fs.move/fs.remove.
+export function generatedDatabasePaths(dbPath: string): GeneratedDatabasePaths {
+  const quarantine = `${dbPath}.corrupt`;
+  const sidecars = [`${dbPath}-journal`, `${dbPath}-wal`, `${dbPath}-shm`];
+  return {
+    db: dbPath,
+    quarantine,
+    sidecars,
+    all: [dbPath, quarantine, ...sidecars],
+  };
 }
 
 // Generated-state guard. Every one of entriesDir, .vs-journal, and the
@@ -421,7 +435,7 @@ export async function assertSafeGeneratedState(
   if (generatedChain.status === "missing") {
     return;
   }
-  for (const file of generatedDatabasePaths(dbPath)) {
+  for (const file of generatedDatabasePaths(dbPath).all) {
     await assertRegularFileOrMissing(anchor, generatedDir, file);
   }
 }
