@@ -33,6 +33,8 @@ const PACKAGE_TARGETS = [
 
 const AGGREGATE_CONTEXT = "CI Required";
 const MIN_VSCODE_VERSION = "1.125.0";
+const NODE_VERSION_FILE = ".nvmrc";
+const NODE_MAJOR = "22";
 
 suite("workflow contract", () => {
   const runQa = read("test/scripts/run-qa.js");
@@ -40,6 +42,7 @@ suite("workflow contract", () => {
   const runTest = read("test/acceptance/runTest.ts");
   const ci = read(".github/workflows/ci.yml");
   const release = read(".github/workflows/release.yml");
+  const nvmrc = read(NODE_VERSION_FILE);
 
   test("run-qa.js is the shared QA command list with every required suite", () => {
     for (const command of [
@@ -83,6 +86,83 @@ suite("workflow contract", () => {
       /process\.env\.VSCODE_TEST_VERSION \|\| "stable"/.test(runTest),
       "runTest.ts must default VSCODE_TEST_VERSION to stable"
     );
+  });
+
+  suite("node toolchain", () => {
+    const workflows = [
+      [".github/workflows/ci.yml", ci],
+      [".github/workflows/release.yml", release],
+    ];
+
+    function nodeVersionLines(workflow) {
+      return workflow
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("node-version"));
+    }
+
+    function selectedVersion(line) {
+      return line
+        .slice(line.indexOf(":") + 1)
+        .trim()
+        .replace(/["']/g, "");
+    }
+
+    function selectsNode20(value) {
+      return value === "20" || value.startsWith("20.");
+    }
+
+    test("the repository declares exactly one Node version source", () => {
+      assert.strictEqual(
+        nvmrc.trim(),
+        NODE_MAJOR,
+        `${NODE_VERSION_FILE} is the single Node version source and must select Node ${NODE_MAJOR}`
+      );
+    });
+
+    test("every workflow Node setup reads that shared source", () => {
+      for (const [name, workflow] of workflows) {
+        const setups = workflow.split("uses: actions/setup-node@").length - 1;
+        const shared =
+          workflow.split(`node-version-file: ${NODE_VERSION_FILE}`).length - 1;
+        assert.ok(setups > 0, `${name} must set up Node`);
+        assert.strictEqual(
+          shared,
+          setups,
+          `every setup-node step in ${name} must read ${NODE_VERSION_FILE}`
+        );
+      }
+    });
+
+    test("no workflow restates the Node version inline", () => {
+      for (const [name, workflow] of workflows) {
+        for (const line of nodeVersionLines(workflow)) {
+          assert.ok(
+            line.startsWith(`node-version-file: ${NODE_VERSION_FILE}`),
+            `${name} must read ${NODE_VERSION_FILE} instead of "${line}"`
+          );
+        }
+        assert.ok(
+          !workflow.includes("NODE_VERSION"),
+          `${name} must not restate the Node version through a NODE_VERSION variable`
+        );
+      }
+    });
+
+    test("no active workflow still selects the EOL Node 20 runtime", () => {
+      for (const [name, workflow] of workflows) {
+        for (const line of nodeVersionLines(workflow)) {
+          assert.ok(
+            !selectsNode20(selectedVersion(line)),
+            `${name} must not select the EOL Node 20 runtime`
+          );
+        }
+      }
+      assert.ok(
+        !selectsNode20(nvmrc.trim()),
+        `${NODE_VERSION_FILE} must not select the EOL Node 20 runtime`
+      );
+    });
   });
 
   suite("ci.yml", () => {
