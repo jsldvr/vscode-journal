@@ -239,8 +239,29 @@ function downloadAttempt(url, partialPath, options, done) {
 
   let settled = false;
   let out;
-  let response;
-  let activeRequest;
+
+  // Every request and response the attempt opens, including superseded
+  // redirect hops. A redirect body is never read, but leaving it open
+  // would keep a live handle past the deadline, so the attempt owns all
+  // of them and tears them all down when it settles.
+  const openStreams = [];
+
+  function track(stream) {
+    openStreams.push(stream);
+    return stream;
+  }
+
+  function discard(stream) {
+    if (stream && !stream.destroyed && typeof stream.destroy === "function") {
+      stream.destroy();
+    }
+  }
+
+  function discardAll() {
+    while (openStreams.length > 0) {
+      discard(openStreams.pop());
+    }
+  }
 
   const deadlineTimer = setTimeout(() => {
     settle(
@@ -267,12 +288,7 @@ function downloadAttempt(url, partialPath, options, done) {
     }
     settled = true;
     clearTimeout(deadlineTimer);
-    if (activeRequest && !activeRequest.destroyed) {
-      activeRequest.destroy();
-    }
-    if (response && !response.destroyed) {
-      response.destroy();
-    }
+    discardAll();
     if (!out || out.destroyed || out.closed) {
       conclude(error);
       return;
@@ -327,7 +343,6 @@ function downloadAttempt(url, partialPath, options, done) {
     const expectedBytes = contentLengthOf(res.headers);
     let receivedBytes = 0;
 
-    response = res;
     out = fs.createWriteStream(partialPath);
     out.on("error", (error) => settle(taggedError(error.message, false, { code: error.code })));
     res.on("data", (chunk) => {
@@ -355,18 +370,26 @@ function downloadAttempt(url, partialPath, options, done) {
   }
 
   function issue(currentUrl, redirectsLeft) {
-    activeRequest = request(
+    let req;
+    req = request(
       currentUrl,
       { headers: { "User-Agent": "vs-journal-build" }, timeout: timeoutMs },
       (res) => {
+        track(res);
         const status = res.statusCode || 0;
         if (status >= 300 && status < 400 && res.headers.location) {
-          res.resume();
+          const location = res.headers.location;
+          // This hop is finished. Close it now rather than at
+          // settlement: the attempt continues, and a redirect body that
+          // never ends would otherwise hold a handle open past the
+          // deadline.
+          discard(res);
+          discard(req);
           if (redirectsLeft === 0) {
             settle(taggedError(`too many redirects for ${url}`, false));
             return;
           }
-          issue(res.headers.location, redirectsLeft - 1);
+          issue(location, redirectsLeft - 1);
           return;
         }
         if (status !== 200) {
@@ -376,8 +399,8 @@ function downloadAttempt(url, partialPath, options, done) {
         consume(res, currentUrl);
       }
     );
+    track(req);
 
-    const req = activeRequest;
     req.on("error", (error) =>
       settle(taggedError(error.message, isTransientNetworkError(error), { code: error.code }))
     );

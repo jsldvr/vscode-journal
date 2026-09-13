@@ -492,6 +492,86 @@ suite("sqlite3 prebuild downloader", () => {
       });
     });
 
+    test("a redirect response is closed and cannot keep streaming", (done) => {
+      const dir = tempDir();
+      const destination = path.join(dir, "asset.tar.gz");
+      let redirectRes;
+      let redirectReq;
+      let observed;
+      let pushesAfterRedirect = 0;
+      let call = 0;
+
+      // The 302 body never ends. Resuming it is not enough: only
+      // destroying it releases the handle before the attempt deadline.
+      function request(url, options, callback) {
+        call += 1;
+        const req = new EventEmitter();
+        req.destroyed = false;
+        req.destroy = function destroy() {
+          req.destroyed = true;
+        };
+        const isRedirect = call === 1;
+        if (isRedirect) {
+          redirectReq = req;
+        }
+        process.nextTick(() => {
+          const res = new Readable({ read() {} });
+          res.on("error", () => {});
+          if (isRedirect) {
+            res.statusCode = 302;
+            res.headers = { location: "https://cdn.invalid/a" };
+            redirectRes = res;
+            callback(res);
+            trackInterval(
+              setInterval(() => {
+                if (!res.destroyed) {
+                  pushesAfterRedirect += 1;
+                  res.push(Buffer.from("x"));
+                }
+              }, 5)
+            );
+            return;
+          }
+          res.statusCode = 200;
+          res.headers = {};
+          callback(res);
+          // Hold the attempt open so the abandoned hop can be observed
+          // mid-attempt. Checking after settlement proves nothing:
+          // settlement tears every tracked stream down anyway.
+          setTimeout(() => {
+            const pushesBefore = pushesAfterRedirect;
+            setTimeout(() => {
+              observed = {
+                destroyed: redirectRes.destroyed,
+                stillStreaming: pushesAfterRedirect > pushesBefore,
+              };
+              res.push(Buffer.from("ok"));
+              res.push(null);
+            }, 30);
+          }, 10);
+        });
+        return req;
+      }
+
+      downloadWithRetry("https://example.invalid/a", destination, baseOptions(request, []), (error) => {
+        assert.strictEqual(error, null);
+        assert.strictEqual(fs.readFileSync(destination, "utf8"), "ok");
+        assert.ok(observed, "the in-flight observation never ran");
+        assert.strictEqual(
+          observed.destroyed,
+          true,
+          "the redirect response must be destroyed while the attempt is still running"
+        );
+        assert.strictEqual(
+          observed.stillStreaming,
+          false,
+          "the abandoned redirect response was still receiving bytes mid-attempt"
+        );
+        assert.strictEqual(redirectReq.destroyed, true, "the redirect request must be destroyed");
+        done();
+      });
+    });
+
     test("each attempt gets its own redirect budget", (done) => {
       const dir = tempDir();
       const destination = path.join(dir, "asset.tar.gz");
@@ -589,6 +669,8 @@ suite("sqlite3 prebuild downloader", () => {
     // A socket inactivity timeout cannot bound these: traffic keeps
     // arriving, or a hop never responds, so only a wall-clock deadline
     // ends the attempt.
+    let lastTrickleResponse;
+
     function tricklingRequest() {
       return function request(url, options, callback) {
         const req = new EventEmitter();
@@ -601,6 +683,7 @@ suite("sqlite3 prebuild downloader", () => {
           res.statusCode = 200;
           res.headers = {};
           res.on("error", () => {});
+          lastTrickleResponse = res;
           callback(res);
           // Registered globally so teardown stops it even when the
           // downloader never settles.
@@ -628,6 +711,13 @@ suite("sqlite3 prebuild downloader", () => {
         assert.match(error.message, /exceeded its 60 ms deadline/);
         assert.strictEqual(fs.existsSync(destination), false);
         assert.strictEqual(fs.existsSync(`${destination}.partial`), false);
+        // Settlement must also release the stream it was reading, or
+        // the handle outlives the attempt it was supposed to bound.
+        assert.strictEqual(
+          lastTrickleResponse.destroyed,
+          true,
+          "settlement must destroy the response it abandoned"
+        );
         done();
       });
     });
