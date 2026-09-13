@@ -5,6 +5,14 @@ test output, and reports belong under this directory. Generated files are
 written to `test/results/`, which is ignored by Git and created by the test
 commands when needed.
 
+## Toolchain
+
+Every command below runs on the Node version declared in `.nvmrc` (Node 22).
+`actions/setup-node` reads that same file in `.github/workflows/ci.yml` and
+`.github/workflows/release.yml`, so local runs and CI share a single version
+source. Select it with `nvm use` (or the equivalent for your version
+manager) before running the suites.
+
 ## Fast and ordinary checks
 
 - `npm run test:unit` compiles and runs deterministic unit tests.
@@ -43,9 +51,9 @@ suites.
 A single aggregate job named **`CI Required`** depends on all three. It runs
 with `always()` and fails unless every dependency reports `success`, so a
 failed, skipped, or cancelled dependency fails it too. `CI Required` is the
-only status check the `main` branch ruleset needs to require; that ruleset
-change is prepared in `.github/rulesets/main-branch-required-check.json` but
-is not yet applied, so CI is currently advisory.
+only status check the `main` branch ruleset requires; that ruleset is
+recorded in `.github/rulesets/main-branch-required-check.json` and is
+applied to the active `main` ruleset, so CI blocks merging.
 
 `.github/workflows/release.yml` runs the same stable QA contract
 (`release:check`) plus the `1.125.0` acceptance suite before any VSIX is

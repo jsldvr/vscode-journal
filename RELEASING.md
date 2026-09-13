@@ -10,18 +10,20 @@ separately authorized and is not automated by this workflow.
 Pull requests run `.github/workflows/ci.yml`, whose single aggregate job
 **`CI Required`** covers the full QA gate, acceptance against both the
 minimum (`1.125.0`) and current stable VS Code, and the seven-target package
-matrix. `CI Required` is the only context the `main` branch ruleset needs to
-require. That ruleset change is prepared in
-`.github/rulesets/main-branch-required-check.json` but has not been applied,
-so a failing CI run does not block merging yet; once the ruleset requires
-`CI Required`, it will.
+matrix. `CI Required` is the only context the `main` branch ruleset
+requires. That ruleset is recorded in
+`.github/rulesets/main-branch-required-check.json` and has been applied to
+the active `main` ruleset, so a failing CI run blocks merging.
 
 Replace `X.Y.Z` in every command with the intended semantic version. Valid
 prerelease versions such as `1.0.1-rc-1` and `1.0.1-beta` are supported.
 
 ## Prerequisites
 
-- Node.js, npm, Git, and the VS Code `code` CLI are available.
+- Node.js, npm, Git, and the VS Code `code` CLI are available. `.nvmrc`
+  declares the supported Node version (Node 22) and is the same file
+  `actions/setup-node` reads in CI and release, so run `nvm use` (or the
+  equivalent for your version manager) before the commands below.
 - The release version and scope have been agreed before changing files.
 - The release change will be reviewed and merged into `main`.
 
@@ -60,6 +62,7 @@ restore the binary for your own machine before running tests locally.
 git switch main
 git pull --ff-only
 git status --short
+nvm use
 npm ci
 ```
 
