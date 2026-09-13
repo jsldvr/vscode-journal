@@ -15,6 +15,12 @@
 // one binary per platform covers every VS Code version the extension
 // supports. Targets absent from the sqlite3 release assets (for
 // example win32-arm64) cannot be packaged and are rejected here.
+//
+// Release-asset delivery fails transiently often enough to break the
+// required packaging matrix on a single HTTP 500, so every download is
+// retried under a bounded policy. Retries are deliberately finite: a
+// permanently missing asset must fail the build quickly rather than
+// sleep through a retry budget.
 
 const fs = require("fs");
 const https = require("https");
@@ -31,7 +37,53 @@ const TARGET_TO_PREBUILD = {
   "alpine-arm64": "linuxmusl-arm64",
 };
 
+const ASSET_HOST = "https://github.com/TryGhost/node-sqlite3/releases/download";
+
+// Redirect budget for a single attempt. Each retry starts over with a
+// full budget, so a redirect loop cannot consume the retry policy.
 const MAX_REDIRECTS = 5;
+
+// Total attempts, including the first. Delays between attempts are
+// 1s, 2s, 4s (plus jitter), so the worst case adds roughly 7s before
+// failing -- well inside the 15-minute packaging job timeout.
+const MAX_ATTEMPTS = 4;
+const BASE_RETRY_DELAY_MS = 1000;
+
+// Upper bound for any single wait, applied to both exponential backoff
+// and a server-supplied Retry-After, so an upstream header can never
+// stall the job.
+const MAX_RETRY_DELAY_MS = 8000;
+
+// Jitter spreads concurrent matrix jobs that retry in lockstep. The
+// delay stays within +/- this fraction of the computed backoff.
+const RETRY_JITTER_RATIO = 0.25;
+
+// Per-attempt socket inactivity timeout. A stalled connection is
+// abandoned and retried rather than hanging the job.
+const ATTEMPT_TIMEOUT_MS = 60000;
+
+// Absolute wall-clock budget for one attempt, covering every redirect
+// hop and the whole response body. The inactivity timeout above cannot
+// bound an attempt on its own: a trickling response resets it forever,
+// and each redirect hop restarts it. Four attempts of 90s plus ~7s of
+// backoff is roughly 6 minutes, inside the 15-minute packaging job
+// budget that also has to install, compile, and package.
+const ATTEMPT_DEADLINE_MS = 90000;
+
+// Statuses worth another attempt: request timeout, rate limiting, and
+// the 5xx family GitHub returns when asset delivery is degraded.
+const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+// Socket-level failures that are demonstrably retryable. Permanent
+// misconfiguration (for example ENOTFOUND) is excluded on purpose.
+const TRANSIENT_NETWORK_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "ENETRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+]);
 
 function fail(message) {
   console.error(`stage-sqlite3-prebuild: ${message}`);
@@ -43,30 +95,446 @@ function currentHostTarget() {
   return TARGET_TO_PREBUILD[key] ? key : undefined;
 }
 
-function download(url, destination, redirectsLeft, done) {
-  https
-    .get(url, { headers: { "User-Agent": "vs-journal-build" } }, (res) => {
-      const status = res.statusCode || 0;
-      if (status >= 300 && status < 400 && res.headers.location) {
-        res.resume();
-        if (redirectsLeft === 0) {
-          done(new Error("too many redirects"));
+function assetNameFor(version, prebuildPlatform) {
+  return `sqlite3-v${version}-napi-v6-${prebuildPlatform}.tar.gz`;
+}
+
+function assetUrlFor(version, asset) {
+  return `${ASSET_HOST}/v${version}/${asset}`;
+}
+
+function isTransientStatus(status) {
+  return TRANSIENT_STATUSES.has(status);
+}
+
+function isTransientNetworkError(error) {
+  if (!error) {
+    return false;
+  }
+  if (error.transient === true) {
+    return true;
+  }
+  return TRANSIENT_NETWORK_CODES.has(error.code);
+}
+
+/**
+ * Marks an error as retryable or terminal. Classification travels with
+ * the error so the retry loop never re-derives it from message text.
+ */
+function taggedError(message, transient, extra) {
+  const error = new Error(message);
+  error.transient = transient;
+  Object.assign(error, extra || {});
+  return error;
+}
+
+/**
+ * Parses Retry-After, which is either delta-seconds or an HTTP date.
+ * Returns undefined when the header is absent or unusable, and never
+ * returns more than MAX_RETRY_DELAY_MS.
+ */
+function parseRetryAfterMs(headerValue, now) {
+  if (typeof headerValue !== "string" || headerValue.trim() === "") {
+    return undefined;
+  }
+  const raw = headerValue.trim();
+  const reference = typeof now === "number" ? now : Date.now();
+
+  if (/^\d+$/.test(raw)) {
+    return Math.min(Number(raw) * 1000, MAX_RETRY_DELAY_MS);
+  }
+
+  const when = Date.parse(raw);
+  if (Number.isNaN(when)) {
+    return undefined;
+  }
+  const delta = when - reference;
+  if (delta <= 0) {
+    return 0;
+  }
+  return Math.min(delta, MAX_RETRY_DELAY_MS);
+}
+
+/**
+ * Delay before the attempt after `completedAttempts`. A usable
+ * Retry-After wins over exponential backoff; both are capped, and
+ * jitter is applied only to the computed backoff.
+ */
+function retryDelayMs(completedAttempts, retryAfterMs, random) {
+  if (typeof retryAfterMs === "number") {
+    return Math.min(Math.max(retryAfterMs, 0), MAX_RETRY_DELAY_MS);
+  }
+  const exponential = BASE_RETRY_DELAY_MS * Math.pow(2, completedAttempts - 1);
+  const capped = Math.min(exponential, MAX_RETRY_DELAY_MS);
+  const roll = typeof random === "function" ? random() : Math.random();
+  const jitter = capped * RETRY_JITTER_RATIO * (roll * 2 - 1);
+  return Math.max(0, Math.round(capped + jitter));
+}
+
+/**
+ * Removes a file, treating "already absent" as success. Every other
+ * failure is thrown: a partial archive that cannot be deleted must not
+ * be reported as cleaned up, and a leftover .tar.gz would be picked up
+ * by `vsce package`, which does not exclude it.
+ */
+function removeFile(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Removes a file and returns the failure instead of throwing, for the
+ * settlement paths that must report a primary error alongside it.
+ */
+function removeFileReportingError(filePath) {
+  try {
+    removeFile(filePath);
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+/**
+ * Joins a primary failure to a cleanup failure so neither is lost. A
+ * command that fails and also leaves a file behind must say so: the
+ * leftover is what makes the next run fail for an unrelated-looking
+ * reason.
+ */
+function describeWithCleanup(primaryMessage, target, cleanupError) {
+  if (!cleanupError) {
+    return primaryMessage;
+  }
+  return `${primaryMessage}; ${target} could not be removed: ${cleanupError.message}`;
+}
+
+function contentLengthOf(headers) {
+  const raw = headers && headers["content-length"];
+  if (typeof raw !== "string" || !/^\d+$/.test(raw.trim())) {
+    return undefined;
+  }
+  return Number(raw.trim());
+}
+
+/**
+ * Runs one complete download attempt into `partialPath`, following up
+ * to `maxRedirects` redirects. Calls `done` exactly once; every
+ * competing request, response, timeout, and stream event is funnelled
+ * through a single settle guard, and the partial file is removed
+ * before any failure is reported.
+ */
+function downloadAttempt(url, partialPath, options, done) {
+  const request = options.request || https.get;
+  const timeoutMs = options.timeoutMs || ATTEMPT_TIMEOUT_MS;
+  const maxRedirects =
+    typeof options.maxRedirects === "number" ? options.maxRedirects : MAX_REDIRECTS;
+
+  const deadlineMs = options.deadlineMs || ATTEMPT_DEADLINE_MS;
+
+  let settled = false;
+  let out;
+
+  // Every request and response the attempt opens, including superseded
+  // redirect hops. A redirect body is never read, but leaving it open
+  // would keep a live handle past the deadline, so the attempt owns all
+  // of them and tears them all down when it settles.
+  const openStreams = [];
+
+  function track(stream) {
+    openStreams.push(stream);
+    return stream;
+  }
+
+  function discard(stream) {
+    if (stream && !stream.destroyed && typeof stream.destroy === "function") {
+      stream.destroy();
+    }
+  }
+
+  function discardAll() {
+    while (openStreams.length > 0) {
+      discard(openStreams.pop());
+    }
+  }
+
+  const deadlineTimer = setTimeout(() => {
+    settle(
+      taggedError(`attempt exceeded its ${deadlineMs} ms deadline for ${url}`, true, {
+        code: "ETIMEDOUT",
+      })
+    );
+  }, deadlineMs);
+
+  // The download's own socket keeps the loop alive while an attempt is
+  // genuinely in flight, so this timer never needs to. Unreferencing it
+  // means a deadline that is somehow never cleared can still not wedge
+  // a build or a test runner into an outer job timeout.
+  if (typeof deadlineTimer.unref === "function") {
+    deadlineTimer.unref();
+  }
+
+  // Removing the partial file while the write stream still holds an
+  // open handle fails on Windows, so cleanup waits for the stream to
+  // close before unlinking.
+  function settle(error) {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    clearTimeout(deadlineTimer);
+    discardAll();
+    if (!out || out.destroyed || out.closed) {
+      conclude(error);
+      return;
+    }
+    out.once("close", () => conclude(error));
+    out.destroy();
+  }
+
+  function conclude(error) {
+    if (!error) {
+      done(null);
+      return;
+    }
+    if (error.cleanupFailed === true) {
+      done(error);
+      return;
+    }
+    const cleanupError = removeFileReportingError(partialPath);
+    if (!cleanupError) {
+      done(error);
+      return;
+    }
+    // A partial file we cannot delete would be retried into and could
+    // survive into the package, so stop rather than retry.
+    done(
+      taggedError(
+        describeWithCleanup(
+          error.message,
+          `the partial file ${partialPath}`,
+          cleanupError
+        ),
+        false,
+        { code: cleanupError.code, cleanupFailed: true }
+      )
+    );
+  }
+
+  function finish(res, expectedBytes, receivedBytes) {
+    if (typeof expectedBytes === "number" && receivedBytes !== expectedBytes) {
+      settle(
+        taggedError(
+          `incomplete download for ${url}: expected ${expectedBytes} bytes, received ${receivedBytes}`,
+          true
+        )
+      );
+      return;
+    }
+    settle(null);
+  }
+
+  function consume(res, currentUrl) {
+    const expectedBytes = contentLengthOf(res.headers);
+    let receivedBytes = 0;
+
+    out = fs.createWriteStream(partialPath);
+    out.on("error", (error) => settle(taggedError(error.message, false, { code: error.code })));
+    res.on("data", (chunk) => {
+      receivedBytes += chunk.length;
+    });
+    res.on("error", (error) =>
+      settle(taggedError(error.message, isTransientNetworkError(error), { code: error.code }))
+    );
+    res.on("aborted", () =>
+      settle(taggedError(`response aborted for ${currentUrl}`, true))
+    );
+    out.on("close", () => finish(res, expectedBytes, receivedBytes));
+    res.pipe(out);
+  }
+
+  function reject(res, currentUrl, status) {
+    res.resume();
+    const retryAfterMs = parseRetryAfterMs(res.headers && res.headers["retry-after"]);
+    settle(
+      taggedError(`HTTP ${status} for ${currentUrl}`, isTransientStatus(status), {
+        status,
+        retryAfterMs,
+      })
+    );
+  }
+
+  function issue(currentUrl, redirectsLeft) {
+    let req;
+    req = request(
+      currentUrl,
+      { headers: { "User-Agent": "vs-journal-build" }, timeout: timeoutMs },
+      (res) => {
+        track(res);
+        const status = res.statusCode || 0;
+        if (status >= 300 && status < 400 && res.headers.location) {
+          const location = res.headers.location;
+          // This hop is finished. Close it now rather than at
+          // settlement: the attempt continues, and a redirect body that
+          // never ends would otherwise hold a handle open past the
+          // deadline.
+          discard(res);
+          discard(req);
+          if (redirectsLeft === 0) {
+            settle(taggedError(`too many redirects for ${url}`, false));
+            return;
+          }
+          issue(location, redirectsLeft - 1);
           return;
         }
-        download(res.headers.location, destination, redirectsLeft - 1, done);
+        if (status !== 200) {
+          reject(res, currentUrl, status);
+          return;
+        }
+        consume(res, currentUrl);
+      }
+    );
+    track(req);
+
+    req.on("error", (error) =>
+      settle(taggedError(error.message, isTransientNetworkError(error), { code: error.code }))
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      settle(
+        taggedError(`timed out after ${timeoutMs} ms for ${currentUrl}`, true, {
+          code: "ETIMEDOUT",
+        })
+      );
+    });
+  }
+
+  const staleError = removeFileReportingError(partialPath);
+  if (staleError) {
+    settle(
+      taggedError(
+        `could not clear the partial file ${partialPath}: ${staleError.message}`,
+        false,
+        { code: staleError.code, cleanupFailed: true }
+      )
+    );
+    return;
+  }
+  issue(url, maxRedirects);
+}
+
+function defaultSleep(ms, done) {
+  setTimeout(done, ms);
+}
+
+/**
+ * Downloads `url` to `destination` with bounded retries. The file at
+ * `destination` is created only after a complete response has been
+ * written, so a caller may treat its existence as proof of success.
+ */
+function downloadWithRetry(url, destination, options, done) {
+  const settings = options || {};
+  const maxAttempts = settings.maxAttempts || MAX_ATTEMPTS;
+  const sleep = settings.sleep || defaultSleep;
+  const renameFile = settings.rename || fs.renameSync;
+  const removePartial = settings.removePartial || removeFileReportingError;
+  const partialPath = `${destination}.partial`;
+  const log = settings.log || console.error;
+
+  function attempt(attemptNumber) {
+    downloadAttempt(url, partialPath, settings, (error) => {
+      if (!error) {
+        finalize();
         return;
       }
-      if (status !== 200) {
-        res.resume();
-        done(new Error(`HTTP ${status} for ${url}`));
+      if (!isTransientNetworkError(error) || attemptNumber >= maxAttempts) {
+        done(finalError(error, attemptNumber));
         return;
       }
-      const out = fs.createWriteStream(destination);
-      res.pipe(out);
-      out.on("finish", () => out.close(() => done(null)));
-      out.on("error", (error) => done(error));
-    })
-    .on("error", (error) => done(error));
+      const delay = retryDelayMs(attemptNumber, error.retryAfterMs, settings.random);
+      log(
+        `stage-sqlite3-prebuild: attempt ${attemptNumber}/${maxAttempts} failed (${error.message}); retrying in ${delay} ms`
+      );
+      sleep(delay, () => attempt(attemptNumber + 1));
+    });
+  }
+
+  function finalize() {
+    try {
+      renameFile(partialPath, destination);
+    } catch (error) {
+      // The rename failed, so the partial is still there. Report both
+      // failures: a leftover partial is what breaks the next run.
+      const cleanupError = removePartial(partialPath);
+      done(
+        taggedError(
+          describeWithCleanup(
+            `could not finalize ${destination}: ${error.message}`,
+            `the partial file ${partialPath}`,
+            cleanupError
+          ),
+          false,
+          { cleanupFailed: cleanupError !== undefined }
+        )
+      );
+      return;
+    }
+    done(null);
+  }
+
+  function finalError(error, attempts) {
+    return taggedError(
+      `${error.message} (after ${attempts} attempt${attempts === 1 ? "" : "s"})`,
+      error.transient === true,
+      { status: error.status, code: error.code, attempts }
+    );
+  }
+
+  attempt(1);
+}
+
+/**
+ * Extracts the staged tarball and deletes it. Returns an error message
+ * instead of exiting so the behavior is testable. The downloaded
+ * archive must be gone before packaging: `.vscodeignore` does not
+ * exclude it, so a leftover .tar.gz would be shipped inside the VSIX.
+ */
+function extractPrebuild(sqlite3Dir, asset, dependencies) {
+  const spawn = (dependencies && dependencies.spawn) || spawnSync;
+  const remove = (dependencies && dependencies.remove) || removeFile;
+
+  // Relative paths with an explicit cwd keep GNU tar on Windows from
+  // parsing the drive letter in C:\... as a remote host name.
+  const extract = spawn("tar", ["-xzf", asset], {
+    cwd: sqlite3Dir,
+    stdio: "inherit",
+  });
+
+  let cleanupError;
+  try {
+    remove(path.join(sqlite3Dir, asset));
+  } catch (error) {
+    cleanupError = error;
+  }
+
+  if (extract.status !== 0) {
+    // Report the archive too: extraction failing does not excuse
+    // leaving a .tar.gz that the next packaging run would ship.
+    return describeWithCleanup(
+      `tar extraction failed with status ${extract.status}`,
+      `the downloaded archive ${asset}`,
+      cleanupError
+    );
+  }
+  if (cleanupError) {
+    return `could not remove the downloaded archive ${asset}: ${cleanupError.message}`;
+  }
+  return undefined;
 }
 
 function main() {
@@ -86,24 +554,20 @@ function main() {
     fs.readFileSync(path.join(sqlite3Dir, "package.json"), "utf8")
   );
   const version = packageJson.version;
-  const asset = `sqlite3-v${version}-napi-v6-${prebuildPlatform}.tar.gz`;
-  const url = `https://github.com/TryGhost/node-sqlite3/releases/download/v${version}/${asset}`;
+  const asset = assetNameFor(version, prebuildPlatform);
+  const url = assetUrlFor(version, asset);
   const tarball = path.join(sqlite3Dir, asset);
 
   console.log(`Downloading ${url}`);
-  download(url, tarball, MAX_REDIRECTS, (error) => {
+  downloadWithRetry(url, tarball, {}, (error) => {
     if (error) {
       fail(error.message);
+      return;
     }
-    // Relative paths with an explicit cwd keep GNU tar on Windows from
-    // parsing the drive letter in C:\... as a remote host name.
-    const extract = spawnSync("tar", ["-xzf", asset], {
-      cwd: sqlite3Dir,
-      stdio: "inherit",
-    });
-    fs.unlinkSync(tarball);
-    if (extract.status !== 0) {
-      fail(`tar extraction failed with status ${extract.status}`);
+    const extractionError = extractPrebuild(sqlite3Dir, asset);
+    if (extractionError) {
+      fail(extractionError);
+      return;
     }
     const binary = path.join(sqlite3Dir, "build", "Release", "node_sqlite3.node");
     if (!fs.existsSync(binary)) {
@@ -114,4 +578,26 @@ function main() {
   });
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  ATTEMPT_DEADLINE_MS,
+  ATTEMPT_TIMEOUT_MS,
+  BASE_RETRY_DELAY_MS,
+  MAX_ATTEMPTS,
+  MAX_REDIRECTS,
+  MAX_RETRY_DELAY_MS,
+  TARGET_TO_PREBUILD,
+  assetNameFor,
+  assetUrlFor,
+  downloadAttempt,
+  downloadWithRetry,
+  extractPrebuild,
+  isTransientNetworkError,
+  isTransientStatus,
+  parseRetryAfterMs,
+  removeFile,
+  retryDelayMs,
+};
