@@ -27,9 +27,11 @@ const {
   assetUrlFor,
   downloadAttempt,
   downloadWithRetry,
+  extractPrebuild,
   isTransientNetworkError,
   isTransientStatus,
   parseRetryAfterMs,
+  removeFile,
   retryDelayMs,
 } = downloader;
 
@@ -89,8 +91,24 @@ function scriptedRequest(script) {
   return request;
 }
 
+const createdDirs = [];
+
 function tempDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "sqlite3-prebuild-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sqlite3-prebuild-test-"));
+  createdDirs.push(dir);
+  return dir;
+}
+
+/** Best-effort teardown; a leaked directory must not fail the suite. */
+function removeCreatedDirs() {
+  while (createdDirs.length > 0) {
+    const dir = createdDirs.pop();
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // The OS temp directory is reclaimed eventually either way.
+    }
+  }
 }
 
 function recordingSleep(delays) {
@@ -111,6 +129,10 @@ function baseOptions(request, delays) {
 }
 
 suite("sqlite3 prebuild downloader", () => {
+  // Every test mints its own temp directory; none may outlive the run.
+  teardown(removeCreatedDirs);
+  suiteTeardown(removeCreatedDirs);
+
   suite("asset contract", () => {
     test("the seven target mappings are unchanged", () => {
       assert.deepStrictEqual(TARGET_TO_PREBUILD, {
@@ -536,6 +558,173 @@ suite("sqlite3 prebuild downloader", () => {
         assert.strictEqual(fs.readFileSync(partial, "utf8"), "complete");
         done();
       }, 60);
+    });
+  });
+
+  suite("absolute attempt deadline", () => {
+    // A socket inactivity timeout cannot bound these: traffic keeps
+    // arriving, or a hop never responds, so only a wall-clock deadline
+    // ends the attempt.
+    function tricklingRequest(intervals) {
+      return function request(url, options, callback) {
+        const req = new EventEmitter();
+        req.destroyed = false;
+        req.destroy = function destroy() {
+          req.destroyed = true;
+        };
+        process.nextTick(() => {
+          const res = new Readable({ read() {} });
+          res.statusCode = 200;
+          res.headers = {};
+          res.on("error", () => {});
+          callback(res);
+          const timer = setInterval(() => {
+            if (!res.destroyed) {
+              res.push(Buffer.from("x"));
+            }
+          }, 5);
+          intervals.push(timer);
+        });
+        return req;
+      };
+    }
+
+    test("a response that never completes is abandoned at the deadline", (done) => {
+      const dir = tempDir();
+      const destination = path.join(dir, "asset.tar.gz");
+      const intervals = [];
+      const options = baseOptions(tricklingRequest(intervals), []);
+      options.deadlineMs = 60;
+      options.maxAttempts = 1;
+
+      downloadWithRetry("https://example.invalid/a", destination, options, (error) => {
+        intervals.forEach(clearInterval);
+        assert.ok(error, "a trickling response must not run forever");
+        assert.match(error.message, /exceeded its 60 ms deadline/);
+        assert.strictEqual(fs.existsSync(destination), false);
+        assert.strictEqual(fs.existsSync(`${destination}.partial`), false);
+        done();
+      });
+    });
+
+    test("a request that never responds is abandoned at the deadline", (done) => {
+      const dir = tempDir();
+      const destination = path.join(dir, "asset.tar.gz");
+      function silentRequest() {
+        const req = new EventEmitter();
+        req.destroyed = false;
+        req.destroy = function destroy() {
+          req.destroyed = true;
+        };
+        return req; // never calls back, never errors
+      }
+      const options = baseOptions(silentRequest, []);
+      options.deadlineMs = 50;
+      options.maxAttempts = 1;
+
+      downloadWithRetry("https://example.invalid/a", destination, options, (error) => {
+        assert.ok(error, "a silent request must not hang the attempt");
+        assert.match(error.message, /exceeded its 50 ms deadline/);
+        done();
+      });
+    });
+
+    test("the deadline is transient, so a later attempt can still succeed", (done) => {
+      const dir = tempDir();
+      const destination = path.join(dir, "asset.tar.gz");
+      const intervals = [];
+      const trickle = tricklingRequest(intervals);
+      let call = 0;
+
+      function request(url, options, callback) {
+        call += 1;
+        if (call === 1) {
+          return trickle(url, options, callback);
+        }
+        const req = new EventEmitter();
+        req.destroy = function destroy() {};
+        process.nextTick(() => {
+          const res = new Readable({ read() {} });
+          res.statusCode = 200;
+          res.headers = {};
+          callback(res);
+          res.push(Buffer.from("recovered"));
+          res.push(null);
+        });
+        return req;
+      }
+
+      const options = baseOptions(request, []);
+      options.deadlineMs = 60;
+
+      downloadWithRetry("https://example.invalid/a", destination, options, (error) => {
+        intervals.forEach(clearInterval);
+        assert.strictEqual(error, null);
+        assert.strictEqual(call, 2);
+        assert.strictEqual(fs.readFileSync(destination, "utf8"), "recovered");
+        done();
+      });
+    });
+  });
+
+  suite("cleanup failures are not silent", () => {
+    test("removeFile ignores a missing file but reports other failures", () => {
+      const dir = tempDir();
+      assert.doesNotThrow(() => removeFile(path.join(dir, "never-existed")));
+      // A directory cannot be unlinked, which stands in for EPERM/EACCES.
+      const blocked = path.join(dir, "blocked");
+      fs.mkdirSync(blocked);
+      assert.throws(() => removeFile(blocked));
+    });
+
+    test("a partial path that cannot be cleared fails without retrying", (done) => {
+      const dir = tempDir();
+      const destination = path.join(dir, "asset.tar.gz");
+      fs.mkdirSync(`${destination}.partial`);
+      const delays = [];
+      const request = scriptedRequest([{ status: 200, body: "ok" }]);
+
+      downloadWithRetry("https://example.invalid/a", destination, baseOptions(request, delays), (error) => {
+        assert.ok(error, "an unclearable partial path must fail");
+        assert.match(error.message, /could not clear the partial file/);
+        assert.deepStrictEqual(delays, [], "a cleanup failure must not be retried");
+        assert.strictEqual(request.calls.length, 0, "no request should be issued");
+        assert.strictEqual(fs.existsSync(destination), false);
+        done();
+      });
+    });
+
+    test("a failed extraction is reported", () => {
+      const message = extractPrebuild("/tmp/nowhere", "asset.tar.gz", {
+        spawn: () => ({ status: 2 }),
+        remove: () => {},
+      });
+      assert.match(String(message), /tar extraction failed with status 2/);
+    });
+
+    test("a downloaded archive that cannot be removed fails the staging step", () => {
+      // .vscodeignore does not exclude *.tar.gz, so a surviving archive
+      // would otherwise be packaged into the VSIX.
+      const message = extractPrebuild("/tmp/nowhere", "asset.tar.gz", {
+        spawn: () => ({ status: 0 }),
+        remove: () => {
+          throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+        },
+      });
+      assert.match(String(message), /could not remove the downloaded archive asset\.tar\.gz/);
+      assert.match(String(message), /permission denied/);
+    });
+
+    test("a clean extraction reports no error", () => {
+      let removed;
+      const message = extractPrebuild("/tmp/nowhere", "asset.tar.gz", {
+        spawn: () => ({ status: 0 }),
+        remove: (target) => {
+          removed = target;
+        },
+      });
+      assert.strictEqual(message, undefined);
+      assert.match(String(removed), /asset\.tar\.gz$/);
     });
   });
 

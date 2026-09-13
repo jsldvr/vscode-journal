@@ -62,6 +62,14 @@ const RETRY_JITTER_RATIO = 0.25;
 // abandoned and retried rather than hanging the job.
 const ATTEMPT_TIMEOUT_MS = 60000;
 
+// Absolute wall-clock budget for one attempt, covering every redirect
+// hop and the whole response body. The inactivity timeout above cannot
+// bound an attempt on its own: a trickling response resets it forever,
+// and each redirect hop restarts it. Four attempts of 90s plus ~7s of
+// backoff is roughly 6 minutes, inside the 15-minute packaging job
+// budget that also has to install, compile, and package.
+const ATTEMPT_DEADLINE_MS = 90000;
+
 // Statuses worth another attempt: request timeout, rate limiting, and
 // the 5xx family GitHub returns when asset delivery is degraded.
 const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
@@ -163,12 +171,34 @@ function retryDelayMs(completedAttempts, retryAfterMs, random) {
   return Math.max(0, Math.round(capped + jitter));
 }
 
-function removeQuietly(filePath) {
+/**
+ * Removes a file, treating "already absent" as success. Every other
+ * failure is thrown: a partial archive that cannot be deleted must not
+ * be reported as cleaned up, and a leftover .tar.gz would be picked up
+ * by `vsce package`, which does not exclude it.
+ */
+function removeFile(filePath) {
   try {
     fs.unlinkSync(filePath);
-  } catch {
-    // A missing partial file is the expected state after a clean run.
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return;
+    }
+    throw error;
   }
+}
+
+/**
+ * Removes a file and returns the failure instead of throwing, for the
+ * settlement paths that must report a primary error alongside it.
+ */
+function removeFileReportingError(filePath) {
+  try {
+    removeFile(filePath);
+  } catch (error) {
+    return error;
+  }
+  return undefined;
 }
 
 function contentLengthOf(headers) {
@@ -192,9 +222,20 @@ function downloadAttempt(url, partialPath, options, done) {
   const maxRedirects =
     typeof options.maxRedirects === "number" ? options.maxRedirects : MAX_REDIRECTS;
 
+  const deadlineMs = options.deadlineMs || ATTEMPT_DEADLINE_MS;
+
   let settled = false;
   let out;
   let response;
+  let activeRequest;
+
+  const deadlineTimer = setTimeout(() => {
+    settle(
+      taggedError(`attempt exceeded its ${deadlineMs} ms deadline for ${url}`, true, {
+        code: "ETIMEDOUT",
+      })
+    );
+  }, deadlineMs);
 
   // Removing the partial file while the write stream still holds an
   // open handle fails on Windows, so cleanup waits for the stream to
@@ -204,6 +245,10 @@ function downloadAttempt(url, partialPath, options, done) {
       return;
     }
     settled = true;
+    clearTimeout(deadlineTimer);
+    if (activeRequest && !activeRequest.destroyed) {
+      activeRequest.destroy();
+    }
     if (response && !response.destroyed) {
       response.destroy();
     }
@@ -216,12 +261,28 @@ function downloadAttempt(url, partialPath, options, done) {
   }
 
   function conclude(error) {
-    if (error) {
-      removeQuietly(partialPath);
+    if (!error) {
+      done(null);
+      return;
+    }
+    if (error.cleanupFailed === true) {
       done(error);
       return;
     }
-    done(null);
+    const cleanupError = removeFileReportingError(partialPath);
+    if (!cleanupError) {
+      done(error);
+      return;
+    }
+    // A partial file we cannot delete would be retried into and could
+    // survive into the package, so stop rather than retry.
+    done(
+      taggedError(
+        `${error.message}; the partial file ${partialPath} could not be removed: ${cleanupError.message}`,
+        false,
+        { code: cleanupError.code, cleanupFailed: true }
+      )
+    );
   }
 
   function finish(res, expectedBytes, receivedBytes) {
@@ -269,7 +330,7 @@ function downloadAttempt(url, partialPath, options, done) {
   }
 
   function issue(currentUrl, redirectsLeft) {
-    const req = request(
+    activeRequest = request(
       currentUrl,
       { headers: { "User-Agent": "vs-journal-build" }, timeout: timeoutMs },
       (res) => {
@@ -291,6 +352,7 @@ function downloadAttempt(url, partialPath, options, done) {
       }
     );
 
+    const req = activeRequest;
     req.on("error", (error) =>
       settle(taggedError(error.message, isTransientNetworkError(error), { code: error.code }))
     );
@@ -304,7 +366,17 @@ function downloadAttempt(url, partialPath, options, done) {
     });
   }
 
-  removeQuietly(partialPath);
+  const staleError = removeFileReportingError(partialPath);
+  if (staleError) {
+    settle(
+      taggedError(
+        `could not clear the partial file ${partialPath}: ${staleError.message}`,
+        false,
+        { code: staleError.code, cleanupFailed: true }
+      )
+    );
+    return;
+  }
   issue(url, maxRedirects);
 }
 
@@ -331,7 +403,6 @@ function downloadWithRetry(url, destination, options, done) {
         return;
       }
       if (!isTransientNetworkError(error) || attemptNumber >= maxAttempts) {
-        removeQuietly(partialPath);
         done(finalError(error, attemptNumber));
         return;
       }
@@ -347,7 +418,7 @@ function downloadWithRetry(url, destination, options, done) {
     try {
       fs.renameSync(partialPath, destination);
     } catch (error) {
-      removeQuietly(partialPath);
+      removeFileReportingError(partialPath);
       done(taggedError(`could not finalize ${destination}: ${error.message}`, false));
       return;
     }
@@ -365,17 +436,37 @@ function downloadWithRetry(url, destination, options, done) {
   attempt(1);
 }
 
-function extractPrebuild(sqlite3Dir, asset) {
+/**
+ * Extracts the staged tarball and deletes it. Returns an error message
+ * instead of exiting so the behavior is testable. The downloaded
+ * archive must be gone before packaging: `.vscodeignore` does not
+ * exclude it, so a leftover .tar.gz would be shipped inside the VSIX.
+ */
+function extractPrebuild(sqlite3Dir, asset, dependencies) {
+  const spawn = (dependencies && dependencies.spawn) || spawnSync;
+  const remove = (dependencies && dependencies.remove) || removeFile;
+
   // Relative paths with an explicit cwd keep GNU tar on Windows from
   // parsing the drive letter in C:\... as a remote host name.
-  const extract = spawnSync("tar", ["-xzf", asset], {
+  const extract = spawn("tar", ["-xzf", asset], {
     cwd: sqlite3Dir,
     stdio: "inherit",
   });
-  removeQuietly(path.join(sqlite3Dir, asset));
-  if (extract.status !== 0) {
-    fail(`tar extraction failed with status ${extract.status}`);
+
+  let cleanupError;
+  try {
+    remove(path.join(sqlite3Dir, asset));
+  } catch (error) {
+    cleanupError = error;
   }
+
+  if (extract.status !== 0) {
+    return `tar extraction failed with status ${extract.status}`;
+  }
+  if (cleanupError) {
+    return `could not remove the downloaded archive ${asset}: ${cleanupError.message}`;
+  }
+  return undefined;
 }
 
 function main() {
@@ -405,7 +496,11 @@ function main() {
       fail(error.message);
       return;
     }
-    extractPrebuild(sqlite3Dir, asset);
+    const extractionError = extractPrebuild(sqlite3Dir, asset);
+    if (extractionError) {
+      fail(extractionError);
+      return;
+    }
     const binary = path.join(sqlite3Dir, "build", "Release", "node_sqlite3.node");
     if (!fs.existsSync(binary)) {
       fail(`extraction did not produce ${binary}`);
@@ -420,6 +515,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  ATTEMPT_DEADLINE_MS,
   ATTEMPT_TIMEOUT_MS,
   BASE_RETRY_DELAY_MS,
   MAX_ATTEMPTS,
@@ -430,8 +526,10 @@ module.exports = {
   assetUrlFor,
   downloadAttempt,
   downloadWithRetry,
+  extractPrebuild,
   isTransientNetworkError,
   isTransientStatus,
   parseRetryAfterMs,
+  removeFile,
   retryDelayMs,
 };
