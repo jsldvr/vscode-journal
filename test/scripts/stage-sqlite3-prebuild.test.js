@@ -99,6 +99,24 @@ function tempDir() {
   return dir;
 }
 
+// Timers created by the trickling fixtures below. They are tracked here
+// rather than per test so teardown can always stop them: if the
+// downloader's deadline ever regresses its callback never fires, and a
+// live interval would keep Node alive and hang the whole release suite
+// instead of failing one test.
+const activeIntervals = [];
+
+function trackInterval(timer) {
+  activeIntervals.push(timer);
+  return timer;
+}
+
+function clearActiveIntervals() {
+  while (activeIntervals.length > 0) {
+    clearInterval(activeIntervals.pop());
+  }
+}
+
 /** Best-effort teardown; a leaked directory must not fail the suite. */
 function removeCreatedDirs() {
   while (createdDirs.length > 0) {
@@ -130,8 +148,14 @@ function baseOptions(request, delays) {
 
 suite("sqlite3 prebuild downloader", () => {
   // Every test mints its own temp directory; none may outlive the run.
-  teardown(removeCreatedDirs);
-  suiteTeardown(removeCreatedDirs);
+  teardown(() => {
+    clearActiveIntervals();
+    removeCreatedDirs();
+  });
+  suiteTeardown(() => {
+    clearActiveIntervals();
+    removeCreatedDirs();
+  });
 
   suite("asset contract", () => {
     test("the seven target mappings are unchanged", () => {
@@ -565,7 +589,7 @@ suite("sqlite3 prebuild downloader", () => {
     // A socket inactivity timeout cannot bound these: traffic keeps
     // arriving, or a hop never responds, so only a wall-clock deadline
     // ends the attempt.
-    function tricklingRequest(intervals) {
+    function tricklingRequest() {
       return function request(url, options, callback) {
         const req = new EventEmitter();
         req.destroyed = false;
@@ -578,12 +602,15 @@ suite("sqlite3 prebuild downloader", () => {
           res.headers = {};
           res.on("error", () => {});
           callback(res);
-          const timer = setInterval(() => {
-            if (!res.destroyed) {
-              res.push(Buffer.from("x"));
-            }
-          }, 5);
-          intervals.push(timer);
+          // Registered globally so teardown stops it even when the
+          // downloader never settles.
+          trackInterval(
+            setInterval(() => {
+              if (!res.destroyed) {
+                res.push(Buffer.from("x"));
+              }
+            }, 5)
+          );
         });
         return req;
       };
@@ -592,13 +619,11 @@ suite("sqlite3 prebuild downloader", () => {
     test("a response that never completes is abandoned at the deadline", (done) => {
       const dir = tempDir();
       const destination = path.join(dir, "asset.tar.gz");
-      const intervals = [];
-      const options = baseOptions(tricklingRequest(intervals), []);
+      const options = baseOptions(tricklingRequest(), []);
       options.deadlineMs = 60;
       options.maxAttempts = 1;
 
       downloadWithRetry("https://example.invalid/a", destination, options, (error) => {
-        intervals.forEach(clearInterval);
         assert.ok(error, "a trickling response must not run forever");
         assert.match(error.message, /exceeded its 60 ms deadline/);
         assert.strictEqual(fs.existsSync(destination), false);
@@ -632,8 +657,7 @@ suite("sqlite3 prebuild downloader", () => {
     test("the deadline is transient, so a later attempt can still succeed", (done) => {
       const dir = tempDir();
       const destination = path.join(dir, "asset.tar.gz");
-      const intervals = [];
-      const trickle = tricklingRequest(intervals);
+      const trickle = tricklingRequest();
       let call = 0;
 
       function request(url, options, callback) {
@@ -658,7 +682,6 @@ suite("sqlite3 prebuild downloader", () => {
       options.deadlineMs = 60;
 
       downloadWithRetry("https://example.invalid/a", destination, options, (error) => {
-        intervals.forEach(clearInterval);
         assert.strictEqual(error, null);
         assert.strictEqual(call, 2);
         assert.strictEqual(fs.readFileSync(destination, "utf8"), "recovered");
@@ -692,6 +715,58 @@ suite("sqlite3 prebuild downloader", () => {
         assert.strictEqual(fs.existsSync(destination), false);
         done();
       });
+    });
+
+    test("a finalization failure also reports a partial that could not be removed", (done) => {
+      const dir = tempDir();
+      const destination = path.join(dir, "asset.tar.gz");
+      const request = scriptedRequest([{ status: 200, body: "ok" }]);
+      const options = baseOptions(request, []);
+      options.rename = () => {
+        throw Object.assign(new Error("rename blocked"), { code: "EPERM" });
+      };
+      options.removePartial = () =>
+        Object.assign(new Error("unlink blocked"), { code: "EBUSY" });
+
+      downloadWithRetry("https://example.invalid/a", destination, options, (error) => {
+        assert.ok(error, "a failed rename must fail the download");
+        assert.match(error.message, /could not finalize/);
+        assert.match(error.message, /rename blocked/);
+        // Both failures must survive, not just the first.
+        assert.match(error.message, /could not be removed/);
+        assert.match(error.message, /unlink blocked/);
+        done();
+      });
+    });
+
+    test("a finalization failure alone does not invent a cleanup failure", (done) => {
+      const dir = tempDir();
+      const destination = path.join(dir, "asset.tar.gz");
+      const request = scriptedRequest([{ status: 200, body: "ok" }]);
+      const options = baseOptions(request, []);
+      options.rename = () => {
+        throw Object.assign(new Error("rename blocked"), { code: "EPERM" });
+      };
+
+      downloadWithRetry("https://example.invalid/a", destination, options, (error) => {
+        assert.ok(error);
+        assert.match(error.message, /could not finalize/);
+        assert.doesNotMatch(error.message, /could not be removed/);
+        done();
+      });
+    });
+
+    test("a failed extraction also reports an archive that could not be removed", () => {
+      const message = extractPrebuild("/tmp/nowhere", "asset.tar.gz", {
+        spawn: () => ({ status: 2 }),
+        remove: () => {
+          throw Object.assign(new Error("archive locked"), { code: "EBUSY" });
+        },
+      });
+      assert.match(String(message), /tar extraction failed with status 2/);
+      // Extraction failing does not excuse leaving the archive behind.
+      assert.match(String(message), /the downloaded archive asset\.tar\.gz could not be removed/);
+      assert.match(String(message), /archive locked/);
     });
 
     test("a failed extraction is reported", () => {

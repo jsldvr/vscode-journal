@@ -201,6 +201,19 @@ function removeFileReportingError(filePath) {
   return undefined;
 }
 
+/**
+ * Joins a primary failure to a cleanup failure so neither is lost. A
+ * command that fails and also leaves a file behind must say so: the
+ * leftover is what makes the next run fail for an unrelated-looking
+ * reason.
+ */
+function describeWithCleanup(primaryMessage, target, cleanupError) {
+  if (!cleanupError) {
+    return primaryMessage;
+  }
+  return `${primaryMessage}; ${target} could not be removed: ${cleanupError.message}`;
+}
+
 function contentLengthOf(headers) {
   const raw = headers && headers["content-length"];
   if (typeof raw !== "string" || !/^\d+$/.test(raw.trim())) {
@@ -236,6 +249,14 @@ function downloadAttempt(url, partialPath, options, done) {
       })
     );
   }, deadlineMs);
+
+  // The download's own socket keeps the loop alive while an attempt is
+  // genuinely in flight, so this timer never needs to. Unreferencing it
+  // means a deadline that is somehow never cleared can still not wedge
+  // a build or a test runner into an outer job timeout.
+  if (typeof deadlineTimer.unref === "function") {
+    deadlineTimer.unref();
+  }
 
   // Removing the partial file while the write stream still holds an
   // open handle fails on Windows, so cleanup waits for the stream to
@@ -278,7 +299,11 @@ function downloadAttempt(url, partialPath, options, done) {
     // survive into the package, so stop rather than retry.
     done(
       taggedError(
-        `${error.message}; the partial file ${partialPath} could not be removed: ${cleanupError.message}`,
+        describeWithCleanup(
+          error.message,
+          `the partial file ${partialPath}`,
+          cleanupError
+        ),
         false,
         { code: cleanupError.code, cleanupFailed: true }
       )
@@ -393,6 +418,8 @@ function downloadWithRetry(url, destination, options, done) {
   const settings = options || {};
   const maxAttempts = settings.maxAttempts || MAX_ATTEMPTS;
   const sleep = settings.sleep || defaultSleep;
+  const renameFile = settings.rename || fs.renameSync;
+  const removePartial = settings.removePartial || removeFileReportingError;
   const partialPath = `${destination}.partial`;
   const log = settings.log || console.error;
 
@@ -416,10 +443,22 @@ function downloadWithRetry(url, destination, options, done) {
 
   function finalize() {
     try {
-      fs.renameSync(partialPath, destination);
+      renameFile(partialPath, destination);
     } catch (error) {
-      removeFileReportingError(partialPath);
-      done(taggedError(`could not finalize ${destination}: ${error.message}`, false));
+      // The rename failed, so the partial is still there. Report both
+      // failures: a leftover partial is what breaks the next run.
+      const cleanupError = removePartial(partialPath);
+      done(
+        taggedError(
+          describeWithCleanup(
+            `could not finalize ${destination}: ${error.message}`,
+            `the partial file ${partialPath}`,
+            cleanupError
+          ),
+          false,
+          { cleanupFailed: cleanupError !== undefined }
+        )
+      );
       return;
     }
     done(null);
@@ -461,7 +500,13 @@ function extractPrebuild(sqlite3Dir, asset, dependencies) {
   }
 
   if (extract.status !== 0) {
-    return `tar extraction failed with status ${extract.status}`;
+    // Report the archive too: extraction failing does not excuse
+    // leaving a .tar.gz that the next packaging run would ship.
+    return describeWithCleanup(
+      `tar extraction failed with status ${extract.status}`,
+      `the downloaded archive ${asset}`,
+      cleanupError
+    );
   }
   if (cleanupError) {
     return `could not remove the downloaded archive ${asset}: ${cleanupError.message}`;
