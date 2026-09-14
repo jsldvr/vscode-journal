@@ -253,7 +253,7 @@
     "@stryker-mutator/core": "^10.0.0",
     "@types/fs-extra": "^11.0.4",
     "@types/mocha": "^10.0.10",
-    "@types/node": "^22.20.2",
+    "@types/node": "^25.9.6",
     "@types/sqlite3": "^5.1.0",
     "@types/vscode": "1.125.0",
     "@typescript-eslint/eslint-plugin": "^8.70.0",
